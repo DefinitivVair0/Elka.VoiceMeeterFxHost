@@ -46,8 +46,8 @@ public partial class SinglePingWindow : Window
         }
 
         ResultTextBlock.Text =
-            $"Single-ping setup staged: {input.DisplayName} -> {output.DisplayName}.\n" +
-            "The WPF shell is ready; the native engine bridge will run the actual ping generator/listener in the next slice.";
+            $"Selected route: {input.DisplayName} -> {output.DisplayName}\n\n" +
+            "Ping measurement is not implemented in this build yet. No test pulse was sent and no delay value was measured.";
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e)
@@ -61,6 +61,6 @@ public partial class SinglePingWindow : Window
         var output = ReturnOutputComboBox.SelectedItem as IoEndpoint;
         SelectionTextBlock.Text = input is null || output is null
             ? string.Empty
-            : $"{input.Name} -> {output.Name}";
+            : $"{input.DisplayName} -> {output.DisplayName}";
     }
 }

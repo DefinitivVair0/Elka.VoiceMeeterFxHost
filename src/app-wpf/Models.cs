@@ -50,6 +50,8 @@ internal sealed record IoEndpoint(string Name, ChannelRange Range)
         : $"{Name} ({Range.Start + 1}-{Range.End + 1})";
 
     public string Key(CallbackMode mode) => $"{mode}:{Name}:{Range.Start}:{Range.End}";
+
+    public override string ToString() => DisplayName;
 }
 
 internal enum EndpointPinMode
