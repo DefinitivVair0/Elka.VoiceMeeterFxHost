@@ -1,0 +1,17 @@
+# Build outputs
+build*/
+out/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# CMake
+CMakeUserPresets.json
+
+# Local/editor files
+.vscode/
+*.log

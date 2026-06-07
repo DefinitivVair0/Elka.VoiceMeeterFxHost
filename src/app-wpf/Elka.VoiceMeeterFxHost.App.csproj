@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <Version>0.2.0</Version>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <NativeBuildConfiguration Condition="'$(Configuration)' == 'Release'">Release</NativeBuildConfiguration>
+    <NativeBuildConfiguration Condition="'$(NativeBuildConfiguration)' == ''">Debug</NativeBuildConfiguration>
+    <NativeBuildPreset Condition="'$(Configuration)' == 'Release'">release</NativeBuildPreset>
+    <NativeBuildPreset Condition="'$(NativeBuildPreset)' == ''">debug</NativeBuildPreset>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))</RepoRoot>
+    <NativeBridgePath>$(RepoRoot)\build-vs2019\$(NativeBuildConfiguration)\ElkaVoiceMeeterFxHost.Native.dll</NativeBridgePath>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == ''">cmake</CMakeExe>
+  </PropertyGroup>
+  <Target Name="BuildNativeBridge" BeforeTargets="Build">
+    <Message Importance="high" Text="Building native VoiceMeeter bridge: $(NativeBuildPreset)" />
+    <Exec Command="&quot;$(CMakeExe)&quot; --preset vs2019-x64"
+          WorkingDirectory="$(RepoRoot)"
+          Condition="!Exists('$(RepoRoot)\build-vs2019\CMakeCache.txt')" />
+    <Exec Command="&quot;$(CMakeExe)&quot; --build --preset $(NativeBuildPreset) --target ElkaVoiceMeeterFxHost.Native"
+          WorkingDirectory="$(RepoRoot)" />
+  </Target>
+  <Target Name="CopyNativeBridge" AfterTargets="BuildNativeBridge">
+    <Copy SourceFiles="$(NativeBridgePath)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>
