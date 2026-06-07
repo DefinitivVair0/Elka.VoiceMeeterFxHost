@@ -25,6 +25,11 @@ src\app-wpf\Properties\PublishProfiles\win-x64-framework-dependent.pubxml
 That profile creates the release EXE/ZIP and uploads both files to the GitHub
 release automatically. The default release tag is `v$(Version)` from the app
 project, for example `v0.2.0`.
+The upload log is written to:
+
+```text
+artifacts\release\github-upload.log
+```
 
 This creates:
 

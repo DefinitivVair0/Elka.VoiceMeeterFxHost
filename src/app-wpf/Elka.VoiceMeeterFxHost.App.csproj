@@ -15,7 +15,7 @@
     <NativeBuildConfiguration Condition="'$(NativeBuildConfiguration)' == ''">Debug</NativeBuildConfiguration>
     <NativeBuildPreset Condition="'$(Configuration)' == 'Release'">release</NativeBuildPreset>
     <NativeBuildPreset Condition="'$(NativeBuildPreset)' == ''">debug</NativeBuildPreset>
-    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))</RepoRoot>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..'))</RepoRoot>
     <NativeBridgePath>$(RepoRoot)\build-vs2019\$(NativeBuildConfiguration)\ElkaVoiceMeeterFxHost.Native.dll</NativeBridgePath>
     <Vst2SdkPath Condition="'$(Vst2SdkPath)' == '' and '$(ELKA_VST2_SDK_PATH)' != ''">$(ELKA_VST2_SDK_PATH)</Vst2SdkPath>
     <Vst2SdkPath Condition="'$(Vst2SdkPath)' == '' and Exists('$(RepoRoot)\external\VST2_SDK\pluginterfaces\vst2.x\aeffect.h')">$(RepoRoot)\external\VST2_SDK</Vst2SdkPath>
