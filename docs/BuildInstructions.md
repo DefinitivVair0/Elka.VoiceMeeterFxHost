@@ -1,5 +1,9 @@
 # Build Instructions
 
+For launching the current WPF app from Visual Studio, use
+`docs/VisualStudioRun.md`. For publish/release packaging, use
+`docs/Publishing.md`.
+
 ## Prerequisites
 
 - Windows 10 or Windows 11.
@@ -39,7 +43,7 @@ hosting.
 Start VoiceMeeter first, then run:
 
 ```powershell
-.\build-vs2019\Debug\ElkaVoiceMeeterFxHost.exe
+.\src\app-wpf\bin\Debug\net8.0-windows\win-x64\ElkaVoiceMeeterFxHost.exe
 ```
 
 Recommended first test:

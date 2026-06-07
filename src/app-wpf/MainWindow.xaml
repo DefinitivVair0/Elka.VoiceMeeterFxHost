@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Elka VoiceMeeter FX Host"
+        Icon="Assets/VoicemeeterDelay.ico"
         Width="1600"
         Height="900"
         MinWidth="1180"
@@ -23,22 +24,11 @@
         <Border Width="62"
                 Height="62"
                 Margin="0,0,14,0"
-                Background="{StaticResource PanelBrush}"
-                BorderBrush="{StaticResource SubtleBorderBrush}"
-                BorderThickness="1"
+                Background="Transparent"
                 CornerRadius="8">
-          <Grid>
-            <Ellipse Width="38"
-                     Height="38"
-                     Fill="{StaticResource RouteActiveBrush}"
-                     Stroke="{StaticResource RouteAccentBrush}"
-                     StrokeThickness="2" />
-            <TextBlock Text="FX"
-                       FontWeight="SemiBold"
-                       HorizontalAlignment="Center"
-                       VerticalAlignment="Center"
-                       Foreground="{StaticResource TextBrush}" />
-          </Grid>
+          <Image Source="Assets/VoicemeeterDelayIconPreview.png"
+                 Stretch="Uniform"
+                 RenderOptions.BitmapScalingMode="HighQuality" />
         </Border>
         <StackPanel VerticalAlignment="Center">
           <TextBlock Text="Elka VoiceMeeter FX Host"

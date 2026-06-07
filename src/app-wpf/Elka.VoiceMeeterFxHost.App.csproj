@@ -9,6 +9,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
+    <ApplicationIcon>Assets\VoicemeeterDelay.ico</ApplicationIcon>
     <NativeBuildConfiguration Condition="'$(Configuration)' == 'Release'">Release</NativeBuildConfiguration>
     <NativeBuildConfiguration Condition="'$(NativeBuildConfiguration)' == ''">Debug</NativeBuildConfiguration>
     <NativeBuildPreset Condition="'$(Configuration)' == 'Release'">release</NativeBuildPreset>
@@ -20,6 +21,10 @@
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == ''">cmake</CMakeExe>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\VoicemeeterDelay.ico" />
+    <Resource Include="Assets\VoicemeeterDelayIconPreview.png" />
+  </ItemGroup>
   <Target Name="BuildNativeBridge" BeforeTargets="Build">
     <Message Importance="high" Text="Building native VoiceMeeter bridge: $(NativeBuildPreset)" />
     <Exec Command="&quot;$(CMakeExe)&quot; --preset vs2019-x64"
@@ -28,9 +33,18 @@
     <Exec Command="&quot;$(CMakeExe)&quot; --build --preset $(NativeBuildPreset) --target ElkaVoiceMeeterFxHost.Native"
           WorkingDirectory="$(RepoRoot)" />
   </Target>
-  <Target Name="CopyNativeBridge" AfterTargets="BuildNativeBridge">
+  <Target Name="CopyNativeBridge" AfterTargets="BuildNativeBridge" Condition="'$(PublishSingleFile)' != 'true'">
     <Copy SourceFiles="$(NativeBridgePath)"
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="AddNativeBridgeToPublish" BeforeTargets="_ComputeFilesToBundle" DependsOnTargets="BuildNativeBridge">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(NativeBridgePath)" Condition="Exists('$(NativeBridgePath)')">
+        <RelativePath>ElkaVoiceMeeterFxHost.Native.dll</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
   </Target>
 </Project>

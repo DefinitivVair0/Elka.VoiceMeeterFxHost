@@ -1,5 +1,7 @@
 # Elka VoiceMeeter FX Host
 
+![Elka VoiceMeeter FX Host social preview](src/app-wpf/Assets/ElkaVoiceMeeterFxHostSocialPreview.png)
+
 WPF control app with a native C++ VoiceMeeter callback/VST bridge.
 
 Open this in Visual Studio:
@@ -7,6 +9,9 @@ Open this in Visual Studio:
 ```text
 Elka.VoiceMeeterFxHost.sln
 ```
+
+Detailed Visual Studio launch steps are in `docs/VisualStudioRun.md`. Local
+publish and GitHub release packaging steps are in `docs/Publishing.md`.
 
 The solution contains the WPF app as the startup project. Building or launching
 the WPF app also builds the native bridge DLL:
@@ -36,6 +41,7 @@ src\app-wpf\bin\Debug\net8.0-windows\win-x64\Elka.VoiceMeeterFxHost.App.exe
 - Native VST3 scan list.
 - WPF Add Node loads a native VST node with default stereo routing.
 - WPF node controls for bypass, editor open, and remove.
+- Endpoint route hue colors for visually linking related VST cables and nodes.
 
 ## Architecture
 

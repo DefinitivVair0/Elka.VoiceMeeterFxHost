@@ -352,6 +352,7 @@ internal sealed class FxHostSettings
     public List<PluginNodeSnapshot> PluginNodes { get; set; } = [];
     public List<CanvasConnectionSnapshot> CanvasConnections { get; set; } = [];
     public Dictionary<string, double> EndpointCanvasYOffsets { get; set; } = [];
+    public Dictionary<string, string> EndpointRouteHues { get; set; } = [];
 }
 
 internal static class FxHostSettingsStore

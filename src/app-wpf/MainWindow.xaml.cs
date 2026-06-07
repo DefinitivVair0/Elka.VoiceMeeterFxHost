@@ -39,6 +39,7 @@ public partial class MainWindow : Window
     private Point _endpointDragStartPoint;
     private double _endpointDragStartOffset;
     private bool _endpointDragMoved;
+    private int? _selectedPluginNodeSlot;
 
     private const string PinEndpointSource = "endpoint-source";
     private const string PinEndpointDestination = "endpoint-destination";
@@ -52,6 +53,15 @@ public partial class MainWindow : Window
     private const double VstCanvasWallMargin = 24.0;
     private const double VstEndpointCardWidth = 156.0;
     private const double VstNodeWidth = 138.0;
+    private static readonly RouteHueChoice[] RouteHueChoices =
+    [
+        new("Blue", "blue", "#4AA3FF", "#10243A"),
+        new("Cyan", "cyan", "#22A6B3", "#102E33"),
+        new("Amber", "amber", "#E2B84A", "#332A12"),
+        new("Magenta", "magenta", "#D879FF", "#2D1738"),
+        new("Red", "red", "#E15F5F", "#331817"),
+        new("Green", "green", "#55C27A", "#14392F")
+    ];
 
     private enum WorkspaceView
     {
@@ -123,6 +133,8 @@ public partial class MainWindow : Window
         public Point Point { get; init; }
         public string Label { get; init; } = string.Empty;
     }
+
+    private sealed record RouteHueChoice(string Name, string Key, string StrokeHex, string FillHex);
 
     private void InputModeButton_Click(object sender, RoutedEventArgs e) => SelectMode(CallbackMode.Input);
 
@@ -226,6 +238,11 @@ public partial class MainWindow : Window
         try
         {
             _settings = FxHostSettingsStore.Load();
+            _settings.Endpoints ??= [];
+            _settings.PluginNodes ??= [];
+            _settings.CanvasConnections ??= [];
+            _settings.EndpointCanvasYOffsets ??= [];
+            _settings.EndpointRouteHues ??= [];
             _kind = _settings.Kind == VoicemeeterKind.Unknown ? VoicemeeterKind.Potato : _settings.Kind;
             _selectedMode = _settings.SelectedMode == CallbackMode.None ? CallbackMode.Input : _settings.SelectedMode;
             PluginSearchTextBox.Text = _settings.PluginSearchText;
@@ -417,6 +434,7 @@ public partial class MainWindow : Window
             var key = endpoint.Key(endpointMode);
             var selected = endpoint == endpointToSelect;
             var active = _settingsByEndpoint.TryGetValue(key, out var settings) && settings.HasActiveChannels;
+            var hueStroke = EndpointHueStrokeBrush(key);
             var button = new Button
             {
                 Content = endpoint.DisplayName,
@@ -431,6 +449,8 @@ public partial class MainWindow : Window
                 Foreground = selected || active
                     ? new SolidColorBrush(Color.FromRgb(6, 19, 22))
                     : (Brush)FindResource("TextBrush"),
+                BorderBrush = hueStroke ?? (Brush)FindResource("StrokeBrush"),
+                BorderThickness = hueStroke is null ? new Thickness(1) : new Thickness(2),
                 ContextMenu = BuildEndpointContextMenu(endpointMode, endpoint)
             };
             button.Click += (_, _) => SelectEndpoint(endpointMode, endpoint);
@@ -469,6 +489,7 @@ public partial class MainWindow : Window
             var active = key is not null &&
                          _settingsByEndpoint.TryGetValue(key, out var settings) &&
                          settings.HasActiveChannels;
+            var hueStroke = key is null ? null : EndpointHueStrokeBrush(key);
             child.Background = active
                 ? (Brush)FindResource("VolumeAccentBrush")
                 : selected
@@ -477,6 +498,8 @@ public partial class MainWindow : Window
             child.Foreground = selected || active
                 ? new SolidColorBrush(Color.FromRgb(6, 19, 22))
                 : (Brush)FindResource("TextBrush");
+            child.BorderBrush = hueStroke ?? (Brush)FindResource("StrokeBrush");
+            child.BorderThickness = hueStroke is null ? new Thickness(1) : new Thickness(2);
         }
     }
 
@@ -496,6 +519,23 @@ public partial class MainWindow : Window
         full.IsCheckable = true;
         full.IsChecked = currentMode == EndpointPinMode.Full;
         menu.Items.Add(full);
+        menu.Items.Add(new Separator());
+
+        var hueMenu = new MenuItem { Header = "Route Hue" };
+        var currentHue = EndpointRouteHueKey(endpoint.Key(mode));
+        var none = CreateNodeMenuItem("None", () => SetEndpointRouteHue(mode, endpoint, string.Empty));
+        none.IsCheckable = true;
+        none.IsChecked = string.IsNullOrEmpty(currentHue);
+        hueMenu.Items.Add(none);
+        foreach (var hue in RouteHueChoices)
+        {
+            var item = CreateNodeMenuItem(hue.Name, () => SetEndpointRouteHue(mode, endpoint, hue.Key));
+            item.IsCheckable = true;
+            item.IsChecked = currentHue == hue.Key;
+            hueMenu.Items.Add(item);
+        }
+
+        menu.Items.Add(hueMenu);
         return menu;
     }
 
@@ -526,6 +566,62 @@ public partial class MainWindow : Window
         AppendLog($"{endpoint.DisplayName}: VST canvas pins set to {EndpointPinModeLabel(mode, endpoint)}.");
         RebuildRoutingCanvas();
         QueueSave();
+    }
+
+    private string? EndpointRouteHueKey(string endpointKey)
+    {
+        return _settings.EndpointRouteHues.TryGetValue(endpointKey, out var hueKey) &&
+               RouteHueChoices.Any(choice => choice.Key == hueKey)
+            ? hueKey
+            : null;
+    }
+
+    private string? EndpointRouteHueKey(CallbackMode mode, int channel)
+    {
+        var endpoint = EndpointForChannel(mode, channel);
+        return endpoint is null ? null : EndpointRouteHueKey(endpoint.Key(mode));
+    }
+
+    private Brush? EndpointHueStrokeBrush(string endpointKey)
+    {
+        return HueStrokeBrush(EndpointRouteHueKey(endpointKey));
+    }
+
+    private Brush? EndpointHueFillBrush(string endpointKey)
+    {
+        return HueFillBrush(EndpointRouteHueKey(endpointKey));
+    }
+
+    private Brush? HueStrokeBrush(string? hueKey)
+    {
+        var hue = RouteHueChoices.FirstOrDefault(choice => choice.Key == hueKey);
+        return hue is null ? null : BrushFromHex(hue.StrokeHex);
+    }
+
+    private Brush? HueFillBrush(string? hueKey)
+    {
+        var hue = RouteHueChoices.FirstOrDefault(choice => choice.Key == hueKey);
+        return hue is null ? null : BrushFromHex(hue.FillHex);
+    }
+
+    private Brush WireStrokeBrush(string? hueKey)
+    {
+        return HueStrokeBrush(hueKey) ?? (Brush)FindResource("RouteAccentBrush");
+    }
+
+    private Brush NodeBackgroundBrush(PluginNodeSnapshot node)
+    {
+        if (node.Bypassed)
+        {
+            return (Brush)FindResource("NeutralBrush");
+        }
+
+        return HueFillBrush(SourceHueKeyForNode(node.Slot, [])) ?? (Brush)FindResource("RouteActiveBrush");
+    }
+
+    private static SolidColorBrush BrushFromHex(string hex)
+    {
+        return new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)!);
     }
 
     private EndpointChannelSettings GetOrCreateChannelSettings(CallbackMode mode, IoEndpoint endpoint)
@@ -1306,6 +1402,26 @@ public partial class MainWindow : Window
         QueueSave();
     }
 
+    private void SetEndpointRouteHue(CallbackMode mode, IoEndpoint endpoint, string hueKey)
+    {
+        var endpointKey = endpoint.Key(mode);
+        if (string.IsNullOrWhiteSpace(hueKey))
+        {
+            _settings.EndpointRouteHues.Remove(endpointKey);
+            AppendLog($"{endpoint.DisplayName}: route hue cleared.");
+        }
+        else
+        {
+            _settings.EndpointRouteHues[endpointKey] = hueKey;
+            var hueName = RouteHueChoices.FirstOrDefault(choice => choice.Key == hueKey)?.Name ?? hueKey;
+            AppendLog($"{endpoint.DisplayName}: route hue set to {hueName}.");
+        }
+
+        RefreshEndpointButtonSelection();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
     private void UpdateRouteEnabled(EndpointChannelSettings settings, int offset, bool enabled)
     {
         settings.RouteEnabled[offset] = enabled;
@@ -1400,6 +1516,7 @@ public partial class MainWindow : Window
 
         _settings.PluginNodes.RemoveAll(existing => existing.Slot == node.Slot);
         _settings.PluginNodes.Add(node);
+        _selectedPluginNodeSlot = node.Slot;
         AppendLog($"Loaded VST node: {node.Name}");
         RefreshEngineCallbackMode();
         RebuildVstNodeList();
@@ -1407,20 +1524,35 @@ public partial class MainWindow : Window
         QueueSave();
     }
 
+    private void SelectPluginNode(int slot, bool rebuildCanvas)
+    {
+        _selectedPluginNodeSlot = slot;
+        RebuildVstNodeList();
+
+        if (rebuildCanvas && _workspaceView == WorkspaceView.Vst)
+        {
+            RebuildRoutingCanvas();
+        }
+    }
+
     private void RebuildVstNodeList()
     {
         VstNodesPanel.Children.Clear();
         foreach (var node in _settings.PluginNodes.Where(NodeBelongsToCurrentCanvas))
         {
+            var selected = _selectedPluginNodeSlot == node.Slot;
             var border = new Border
             {
-                Background = (Brush)FindResource("RouteActiveBrush"),
-                BorderBrush = (Brush)FindResource("RouteAccentBrush"),
-                BorderThickness = new Thickness(1),
+                Background = NodeBackgroundBrush(node),
+                BorderBrush = selected
+                    ? (Brush)FindResource("VolumeAccentBrush")
+                    : (Brush)FindResource("RouteAccentBrush"),
+                BorderThickness = selected ? new Thickness(2) : new Thickness(1),
                 CornerRadius = new CornerRadius(5),
                 Padding = new Thickness(8),
                 Margin = new Thickness(0, 0, 0, 6)
             };
+            border.MouseLeftButtonDown += (_, _) => SelectPluginNode(node.Slot, rebuildCanvas: true);
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -1486,7 +1618,13 @@ public partial class MainWindow : Window
         _engine.RemovePluginNode(node.Slot);
         _settings.PluginNodes.Remove(node);
         _settings.CanvasConnections.RemoveAll(connection => connection.FromSlot == node.Slot || connection.ToSlot == node.Slot);
+        if (_selectedPluginNodeSlot == node.Slot)
+        {
+            _selectedPluginNodeSlot = null;
+        }
+
         RefreshEngineCallbackMode();
+        RebuildVstNodeList();
         RebuildRoutingCanvas();
         QueueSave();
     }
@@ -1585,15 +1723,17 @@ public partial class MainWindow : Window
         var height = pinCount <= 2 ? 74.0 : 154.0;
         var endpointMenu = BuildEndpointContextMenu(mode, endpoint);
         var endpointKey = endpoint.Key(mode);
+        var hueStroke = EndpointHueStrokeBrush(endpointKey);
+        var hueFill = EndpointHueFillBrush(endpointKey);
         y += EndpointCanvasYOffset(endpointKey);
         _endpointVisualElements[endpointKey] = [];
         var border = new Border
         {
             Width = VstEndpointCardWidth,
             Height = height,
-            Background = (Brush)FindResource("PanelBrush"),
-            BorderBrush = (Brush)FindResource("SubtleBorderBrush"),
-            BorderThickness = new Thickness(1),
+            Background = hueFill ?? (Brush)FindResource("PanelBrush"),
+            BorderBrush = hueStroke ?? (Brush)FindResource("SubtleBorderBrush"),
+            BorderThickness = hueStroke is null ? new Thickness(1) : new Thickness(2),
             CornerRadius = new CornerRadius(6),
             ContextMenu = endpointMenu,
             Tag = new EndpointDragInfo(mode, endpoint)
@@ -1645,7 +1785,7 @@ public partial class MainWindow : Window
                 Width = 10,
                 Height = 10,
                 Fill = (Brush)FindResource("FieldBrush"),
-                Stroke = outputSide ? (Brush)FindResource("RouteAccentBrush") : (Brush)FindResource("DelayAccentBrush"),
+                Stroke = hueStroke ?? (outputSide ? (Brush)FindResource("RouteAccentBrush") : (Brush)FindResource("DelayAccentBrush")),
                 StrokeThickness = 1.5,
                 Cursor = Cursors.Hand,
                 Tag = pinInfo,
@@ -1661,7 +1801,7 @@ public partial class MainWindow : Window
             {
                 Text = EndpointPinLabel(pinCount, offset),
                 FontSize = 11,
-                Foreground = (Brush)FindResource("MutedTextBrush"),
+                Foreground = hueStroke ?? (Brush)FindResource("MutedTextBrush"),
                 ContextMenu = BuildEndpointContextMenu(mode, endpoint)
             };
             Canvas.SetLeft(label, outputSide ? x + 28 : x + 118);
@@ -1685,15 +1825,18 @@ public partial class MainWindow : Window
         foreach (var node in _settings.PluginNodes.Where(NodeBelongsToCurrentCanvas))
         {
             _nodeVisualElements[node.Slot] = [];
+            var selected = _selectedPluginNodeSlot == node.Slot;
             var pinRows = Math.Max(node.InputPins, node.OutputPins);
             var nodeHeight = Math.Max(96.0, 62.0 + (pinRows * 18.0));
             var border = new Border
             {
                 Width = VstNodeWidth,
                 Height = nodeHeight,
-                Background = node.Bypassed ? (Brush)FindResource("NeutralBrush") : (Brush)FindResource("RouteActiveBrush"),
-                BorderBrush = (Brush)FindResource("RouteAccentBrush"),
-                BorderThickness = new Thickness(1),
+                Background = NodeBackgroundBrush(node),
+                BorderBrush = selected
+                    ? (Brush)FindResource("VolumeAccentBrush")
+                    : (Brush)FindResource("RouteAccentBrush"),
+                BorderThickness = selected ? new Thickness(2) : new Thickness(1),
                 CornerRadius = new CornerRadius(6),
                 Padding = new Thickness(10, 8, 10, 8),
                 Tag = node,
@@ -1836,6 +1979,7 @@ public partial class MainWindow : Window
         node.MainInputPins = Math.Clamp(safeMainInputs, 1, node.InputPins);
         node.SidechainInputPins = Math.Min(safeSidechainInputs, Math.Max(0, node.InputPins - node.MainInputPins));
         node.Bypassed = wasBypassed;
+        _selectedPluginNodeSlot = node.Slot;
 
         if (wasBypassed)
         {
@@ -2050,13 +2194,18 @@ public partial class MainWindow : Window
             Label = $"{node.Name} {(input ? "in" : "out")} {labelText}"
         };
         _pinPositions[PinPositionKey(pinInfo)] = pinInfo.Point;
+        var nodeHueStroke = HueStrokeBrush(SourceHueKeyForNode(node.Slot, []));
 
         var pin = new Ellipse
         {
             Width = 12,
             Height = 12,
-            Fill = node.Bypassed ? (Brush)FindResource("NeutralBrush") : (Brush)FindResource("RouteActiveBrush"),
-            Stroke = input ? (Brush)FindResource("DelayAccentBrush") : (Brush)FindResource("RouteAccentBrush"),
+            Fill = NodeBackgroundBrush(node),
+            Stroke = input
+                ? IsSidechainVisualInputPin(node, pinIndex)
+                    ? (Brush)FindResource("DelayAccentBrush")
+                    : nodeHueStroke ?? (Brush)FindResource("DelayAccentBrush")
+                : nodeHueStroke ?? (Brush)FindResource("RouteAccentBrush"),
             StrokeThickness = 2,
             Cursor = Cursors.Hand,
             Tag = pinInfo
@@ -2436,6 +2585,47 @@ public partial class MainWindow : Window
         return allowedEndpointKeys.Contains(destinationEndpoint.Key(target.Mode));
     }
 
+    private string? SourceHueKeyForNode(int slot, HashSet<int> visitedSlots)
+    {
+        if (!visitedSlots.Add(slot))
+        {
+            return null;
+        }
+
+        var targetNode = _settings.PluginNodes.FirstOrDefault(node => node.Slot == slot);
+        foreach (var connection in _settings.CanvasConnections)
+        {
+            if (connection.Kind == ConnectionEndpointToNode && connection.ToSlot == slot)
+            {
+                if (targetNode is not null && IsSidechainVisualInputPin(targetNode, connection.ToPin))
+                {
+                    continue;
+                }
+
+                var hueKey = EndpointRouteHueKey(connection.FromMode, connection.FromChannel);
+                if (!string.IsNullOrEmpty(hueKey))
+                {
+                    return hueKey;
+                }
+            }
+            else if (connection.Kind == ConnectionNodeToNode && connection.ToSlot == slot)
+            {
+                if (targetNode is not null && IsSidechainVisualInputPin(targetNode, connection.ToPin))
+                {
+                    continue;
+                }
+
+                var hueKey = SourceHueKeyForNode(connection.FromSlot, visitedSlots);
+                if (!string.IsNullOrEmpty(hueKey))
+                {
+                    return hueKey;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private HashSet<string> SourceEndpointKeysForNode(int slot, HashSet<int> visitedSlots)
     {
         if (!visitedSlots.Add(slot))
@@ -2510,7 +2700,7 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            RoutingCanvas.Children.Insert(0, CreateNormalledWirePath(start, end));
+            RoutingCanvas.Children.Insert(0, CreateNormalledWirePath(start, end, HueStrokeBrush(EndpointRouteHueKey(leftMode, channel))));
         }
     }
 
@@ -2548,8 +2738,28 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            RoutingCanvas.Children.Insert(0, CreateWirePath(start, end, preview: false));
+            RoutingCanvas.Children.Insert(0, CreateWirePath(start, end, preview: false, WireStrokeBrush(ConnectionHueKey(connection))));
         }
+    }
+
+    private string? ConnectionHueKey(CanvasConnectionSnapshot connection)
+    {
+        return connection.Kind switch
+        {
+            ConnectionEndpointToNode => EndpointRouteHueKey(connection.FromMode, connection.FromChannel),
+            ConnectionNodeToEndpoint or ConnectionNodeToNode => SourceHueKeyForNode(connection.FromSlot, []),
+            _ => null
+        };
+    }
+
+    private string? PinHueKey(CanvasPinInfo pin)
+    {
+        return pin.Kind switch
+        {
+            PinEndpointSource => EndpointRouteHueKey(pin.Mode, pin.Channel),
+            PinNodeOutput when pin.Node is not null => SourceHueKeyForNode(pin.Node.Slot, []),
+            _ => null
+        };
     }
 
     private bool TryGetConnectionPoints(CanvasConnectionSnapshot connection, out Point start, out Point end)
@@ -2583,7 +2793,7 @@ public partial class MainWindow : Window
 
         if (_wirePreview is null)
         {
-            _wirePreview = CreateWirePath(_wireDragStart.Point, current, preview: true);
+            _wirePreview = CreateWirePath(_wireDragStart.Point, current, preview: true, WireStrokeBrush(PinHueKey(_wireDragStart)));
             RoutingCanvas.Children.Add(_wirePreview);
         }
         else
@@ -2603,12 +2813,12 @@ public partial class MainWindow : Window
         _wireDragStart = null;
     }
 
-    private Path CreateWirePath(Point start, Point end, bool preview)
+    private Path CreateWirePath(Point start, Point end, bool preview, Brush? stroke = null)
     {
         return new Path
         {
             Data = CreateWireGeometry(start, end),
-            Stroke = (Brush)FindResource("RouteAccentBrush"),
+            Stroke = stroke ?? (Brush)FindResource("RouteAccentBrush"),
             StrokeThickness = preview ? 3.0 : 2.4,
             Opacity = preview ? 0.92 : 0.72,
             StrokeStartLineCap = PenLineCap.Round,
@@ -2618,14 +2828,14 @@ public partial class MainWindow : Window
         };
     }
 
-    private Path CreateNormalledWirePath(Point start, Point end)
+    private Path CreateNormalledWirePath(Point start, Point end, Brush? stroke = null)
     {
         return new Path
         {
             Data = CreateWireGeometry(start, end),
-            Stroke = (Brush)FindResource("SubtleBorderBrush"),
+            Stroke = stroke ?? (Brush)FindResource("SubtleBorderBrush"),
             StrokeThickness = 1.4,
-            Opacity = 0.42,
+            Opacity = stroke is null ? 0.42 : 0.50,
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
             IsHitTestVisible = false,
@@ -2700,6 +2910,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        SelectPluginNode(node.Slot, rebuildCanvas: false);
         _draggingNode = node;
         var point = e.GetPosition(RoutingCanvas);
         _dragOffset = new Point(point.X - node.X, point.Y - node.Y);

@@ -84,7 +84,7 @@ namespace Elka.VoiceMeeterFxHost.App {
                 return;
             }
             _contentLoaded = true;
-            System.Uri resourceLocater = new System.Uri("/Elka.VoiceMeeterFxHost.App;component/singlepingwindow.xaml", System.UriKind.Relative);
+            System.Uri resourceLocater = new System.Uri("/ElkaVoiceMeeterFxHost;component/singlepingwindow.xaml", System.UriKind.Relative);
             
             #line 1 "..\..\..\..\SinglePingWindow.xaml"
             System.Windows.Application.LoadComponent(this, resourceLocater);
