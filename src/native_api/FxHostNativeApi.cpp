@@ -111,6 +111,51 @@ std::wstring widenUtf8(const std::string& value)
     return result;
 }
 
+std::string narrowWide(const wchar_t* value)
+{
+    if (value == nullptr || value[0] == L'\0')
+        return {};
+
+    const int required = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+    if (required <= 0)
+        return {};
+
+    std::string result(static_cast<size_t>(required - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), required, nullptr, nullptr);
+    return result;
+}
+
+std::vector<std::string> splitPluginFolders(const wchar_t* folders)
+{
+    std::vector<std::string> result;
+    std::wstring text = folders != nullptr ? folders : L"";
+    std::wstring current;
+    for (wchar_t ch : text)
+    {
+        if (ch == L';' || ch == L'\n' || ch == L'\r')
+        {
+            if (!current.empty())
+            {
+                result.push_back(narrowWide(current.c_str()));
+                current.clear();
+            }
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    if (!current.empty())
+        result.push_back(narrowWide(current.c_str()));
+
+    result.erase(
+        std::remove_if(result.begin(), result.end(), [](const std::string& value) { return value.empty(); }),
+        result.end());
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
 NativeHost& host()
 {
     if (!g_host)
@@ -398,6 +443,8 @@ __declspec(dllexport) int __cdecl ElkaFx_GetPluginName(int index, wchar_t* buffe
     std::wstring label = widenUtf8(plugin.name);
     if (!plugin.manufacturer.empty())
         label += L" - " + widenUtf8(plugin.manufacturer);
+    if (!plugin.format.empty())
+        label += L" [" + widenUtf8(plugin.format) + L"]";
 
     writeWide(label, buffer, bufferChars);
     return 0;
@@ -407,7 +454,7 @@ __declspec(dllexport) int __cdecl ElkaFx_ScanDefaultVst3(wchar_t* status, int st
 {
     std::lock_guard lock(g_mutex);
     auto& target = host();
-    const int count = target.plugins.scanDefaultVst3Locations();
+    const int count = target.plugins.scanDefaultPluginLocations();
     if (!target.plugins.lastError().empty())
     {
         writeWide(widenUtf8(target.plugins.lastError()), status, statusChars);
@@ -415,6 +462,54 @@ __declspec(dllexport) int __cdecl ElkaFx_ScanDefaultVst3(wchar_t* status, int st
     }
 
     writeWide(L"Plugin scan complete: " + std::to_wstring(count) + L" plugin(s)", status, statusChars);
+    return count;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_ScanPluginFolders(
+    const wchar_t* folders,
+    int includeDefaults,
+    wchar_t* status,
+    int statusChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+
+    std::vector<std::string> paths;
+    if (includeDefaults != 0)
+    {
+        auto defaults = target.plugins.defaultPluginSearchPaths();
+        paths.insert(paths.end(), defaults.begin(), defaults.end());
+    }
+
+    auto customFolders = splitPluginFolders(folders);
+    paths.insert(paths.end(), customFolders.begin(), customFolders.end());
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+
+    const int count = target.plugins.scanPluginPaths(paths, false);
+    if (!target.plugins.lastError().empty())
+    {
+        writeWide(widenUtf8(target.plugins.lastError()), status, statusChars);
+        return -1;
+    }
+
+    std::wstring message = L"Plugin scan complete: " + std::to_wstring(count) + L" plugin(s)";
+    if (!customFolders.empty())
+        message += L" from standard locations + " + std::to_wstring(customFolders.size()) + L" folder(s)";
+
+#if ELKA_ENABLE_VST2_HOST
+    message += L" | VST2 enabled";
+#else
+    message += L" | VST2 disabled";
+#endif
+
+    const auto& report = target.plugins.lastScanReport();
+    if (!report.empty())
+    {
+        message += L"\n" + widenUtf8(report);
+    }
+
+    writeWide(message, status, statusChars);
     return count;
 }
 

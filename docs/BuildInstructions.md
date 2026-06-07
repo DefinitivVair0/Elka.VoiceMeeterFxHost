@@ -11,6 +11,7 @@ For launching the current WPF app from Visual Studio, use
 - VoiceMeeter installed.
 - VoiceMeeter running for runtime testing.
 - JUCE under `external/JUCE` for VST3 plugin discovery.
+- Optional VST2 SDK path; see `docs/VST2Workflow.md`.
 
 This machine has Visual Studio Community 2022 installed, but that installation
 currently reports as incomplete. The verified build path is Visual Studio 2019
@@ -25,17 +26,23 @@ C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtens
 From `C:\Users\torme\source\repos\Elka.VoiceMeeterFxHost`:
 
 ```powershell
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -S . -B build-vs2019 -G "Visual Studio 16 2019" -A x64
+& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --preset vs2019-x64
 ```
 
 If `external/JUCE` exists, CMake enables the JUCE VST3 discovery layer. If it is
 missing, the callback, delay, and gain prototype still builds without plugin
 hosting.
 
+To configure VST2 hosting with a local SDK:
+
+```powershell
+& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --preset vs2019-x64 -DELKA_VST2_SDK_PATH="D:\AudioSDKs\VST2_SDK"
+```
+
 ## Build
 
 ```powershell
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build build-vs2019 --config Debug
+& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build --preset debug --target ElkaVoiceMeeterFxHost.Native
 ```
 
 ## Run
@@ -43,22 +50,16 @@ hosting.
 Start VoiceMeeter first, then run:
 
 ```powershell
-.\src\app-wpf\bin\Debug\net8.0-windows\win-x64\ElkaVoiceMeeterFxHost.exe
+.\src\app-wpf\bin\Debug\net8.0-windows\win-x64\Elka.VoiceMeeterFxHost.App.exe
 ```
 
 Recommended first test:
 
-1. Select `Input Insert`.
-2. Select `Strip 1 L/R`.
-3. Click `Connect`.
-4. Keep delay at `0 ms` and gain at `100%`.
-5. Click `Start`.
-6. Confirm sample rate, block size, and channels update.
-7. Move one gain fader down/up and confirm only that channel changes.
-8. Move one delay strip from `0 ms` upward and confirm only that channel delays.
-9. Enable `Link faders`, move one delay strip or gain fader, and confirm the
-   whole selected source group follows.
-10. Change to another source group and confirm its saved delay/gain state
-    appears.
-11. Click `Scan VST3` and confirm the plugin host reports either the found
-    plugin count or a clear error.
+1. Select `Input`.
+2. Select a VoiceMeeter section such as `VAIO`.
+3. Open `Channels` and confirm delay, volume, and direct routing.
+4. Open `VST`.
+5. Click `Scan` and confirm the plugin host reports either the found plugin
+   count or a clear error.
+6. Add a plugin node and drag cables from the left endpoint through the plugin
+   to the right endpoint.

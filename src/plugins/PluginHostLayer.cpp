@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <windows.h>
 
@@ -62,6 +63,14 @@ juce::File pluginCacheFile()
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
         .getChildFile("Elka")
         .getChildFile("VoiceMeeterFxHost")
+        .getChildFile("plugin-cache.xml");
+}
+
+juce::File legacyPluginCacheFile()
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Elka")
+        .getChildFile("VoiceMeeterFxHost")
         .getChildFile("vst3-cache.xml");
 }
 
@@ -96,6 +105,124 @@ PluginSummary toSummary(const juce::PluginDescription& description)
         description.numOutputChannels,
         description.isInstrument
     };
+}
+
+std::string pluginKey(const PluginSummary& summary)
+{
+    return summary.format + "|" + summary.name + "|" + summary.fileOrIdentifier;
+}
+
+std::string pluginKey(const juce::PluginDescription& description)
+{
+    return description.pluginFormatName.toStdString() + "|" +
+           description.name.toStdString() + "|" +
+           description.fileOrIdentifier.toStdString();
+}
+
+void scanFormatIntoList(
+    juce::AudioPluginFormat& format,
+    const std::vector<std::string>& paths,
+    std::set<std::string>& seen,
+    std::vector<PluginSummary>& summaries,
+    std::vector<juce::PluginDescription>& descriptions,
+    std::ostringstream& report)
+{
+    for (const auto& path : paths)
+    {
+        if (!std::filesystem::is_directory(std::filesystem::path(path)))
+        {
+            report << "Skip missing folder: " << path << "\n";
+            continue;
+        }
+
+        report << "Scanning " << format.getName().toStdString() << ": " << path << "\n";
+        juce::FileSearchPath searchPath(juce::String::fromUTF8(path.c_str()));
+
+        juce::StringArray candidates;
+        try
+        {
+            candidates = format.searchPathsForPlugins(searchPath, true, false);
+        }
+        catch (...)
+        {
+            report << "  Could not enumerate this folder.\n";
+            continue;
+        }
+
+        if (candidates.isEmpty())
+            report << "  No plugin candidates found.\n";
+
+        for (const auto& fileOrIdentifier : candidates)
+        {
+            report << "  Candidate: " << fileOrIdentifier.toStdString() << "\n";
+
+            juce::OwnedArray<juce::PluginDescription> found;
+            try
+            {
+                format.findAllTypesForFile(found, fileOrIdentifier);
+            }
+            catch (...)
+            {
+                report << "    Failed while reading plugin metadata.\n";
+                continue;
+            }
+
+            if (found.isEmpty())
+                report << "    No loadable plugin types reported.\n";
+
+            for (const auto* description : found)
+            {
+                if (description == nullptr)
+                    continue;
+
+                const auto key = pluginKey(*description);
+                if (!seen.insert(key).second)
+                {
+                    report << "    Duplicate skipped: " << description->name.toStdString() << "\n";
+                    continue;
+                }
+
+                summaries.push_back(toSummary(*description));
+                descriptions.push_back(*description);
+                report << "    Added: " << description->name.toStdString();
+                if (description->manufacturerName.isNotEmpty())
+                    report << " - " << description->manufacturerName.toStdString();
+                report << " [" << description->pluginFormatName.toStdString() << "]"
+                       << " in " << description->numInputChannels
+                       << " / out " << description->numOutputChannels << "\n";
+            }
+        }
+    }
+}
+
+std::unique_ptr<juce::AudioPluginInstance> createPluginInstanceForDescription(
+    const juce::PluginDescription& description,
+    double sampleRate,
+    int blockSize,
+    juce::String& creationError)
+{
+    if (description.pluginFormatName.equalsIgnoreCase("VST3"))
+    {
+        juce::VST3PluginFormat vst3Format;
+        return vst3Format.createInstanceFromDescription(description, sampleRate, blockSize, creationError);
+    }
+
+#if ELKA_ENABLE_VST2_HOST && JUCE_INTERNAL_HAS_VST
+    if (description.pluginFormatName.equalsIgnoreCase("VST"))
+    {
+        juce::VSTPluginFormat vstFormat;
+        return vstFormat.createInstanceFromDescription(description, sampleRate, blockSize, creationError);
+    }
+#else
+    if (description.pluginFormatName.equalsIgnoreCase("VST"))
+    {
+        creationError = "VST2 hosting is not enabled. Configure ELKA_VST2_SDK_PATH and rebuild.";
+        return nullptr;
+    }
+#endif
+
+    creationError = "Unsupported plugin format: " + description.pluginFormatName;
+    return nullptr;
 }
 
 int clampPluginChannels(int requested, const juce::PluginDescription& description)
@@ -312,7 +439,11 @@ bool PluginHostLayer::isAvailable() const noexcept
 std::string PluginHostLayer::backendName() const
 {
 #if ELKA_ENABLE_JUCE_PLUGIN_HOST
+  #if ELKA_ENABLE_VST2_HOST
+    return "JUCE VST3/VST2";
+  #else
     return "JUCE VST3";
+  #endif
 #else
     return "Unavailable";
 #endif
@@ -332,9 +463,42 @@ std::vector<std::string> PluginHostLayer::defaultVst3SearchPaths() const
     return paths;
 }
 
+std::vector<std::string> PluginHostLayer::defaultVst2SearchPaths() const
+{
+    std::vector<std::string> paths;
+
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST && ELKA_ENABLE_VST2_HOST
+    addIfDirectoryExists(paths, envVar(L"ProgramFiles") + L"\\Steinberg\\VstPlugins");
+    addIfDirectoryExists(paths, envVar(L"ProgramFiles") + L"\\VstPlugins");
+    addIfDirectoryExists(paths, envVar(L"ProgramFiles") + L"\\Common Files\\VST2");
+    addIfDirectoryExists(paths, envVar(L"ProgramFiles(x86)") + L"\\Steinberg\\VstPlugins");
+    addIfDirectoryExists(paths, envVar(L"ProgramFiles(x86)") + L"\\VstPlugins");
+    addIfDirectoryExists(paths, envVar(L"ProgramFiles(x86)") + L"\\Common Files\\VST2");
+#endif
+
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+    return paths;
+}
+
+std::vector<std::string> PluginHostLayer::defaultPluginSearchPaths() const
+{
+    auto paths = defaultVst3SearchPaths();
+    auto vst2Paths = defaultVst2SearchPaths();
+    paths.insert(paths.end(), vst2Paths.begin(), vst2Paths.end());
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+    return paths;
+}
+
 int PluginHostLayer::scanDefaultVst3Locations()
 {
-    return scanVst3Paths(defaultVst3SearchPaths(), false);
+    return scanPluginPaths(defaultVst3SearchPaths(), false);
+}
+
+int PluginHostLayer::scanDefaultPluginLocations()
+{
+    return scanPluginPaths(defaultPluginSearchPaths(), false);
 }
 
 int PluginHostLayer::scanVst3Folder(const std::string& folder)
@@ -345,35 +509,58 @@ int PluginHostLayer::scanVst3Folder(const std::string& folder)
         return static_cast<int>(discoveredPlugins.size());
     }
 
-    return scanVst3Paths(std::vector<std::string> { folder }, true);
+    return scanPluginPaths(std::vector<std::string> { folder }, true);
 }
 
-int PluginHostLayer::scanVst3Paths(const std::vector<std::string>& paths, bool append)
+int PluginHostLayer::scanPluginPaths(const std::vector<std::string>& paths, bool append)
 {
-    (void)append;
     error.clear();
+    scanReport.clear();
+
+    std::ostringstream report;
+    report << "Plugin scan started.\n";
+
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+  #if ELKA_ENABLE_VST2_HOST
+    report << "Backend: JUCE VST3/VST2\n";
+  #else
+    report << "Backend: JUCE VST3 only\n";
+    report << "VST2 disabled in this build. Legacy .dll plugins will not appear until ELKA_VST2_SDK_PATH is configured and the app is rebuilt.\n";
+  #endif
+#else
+    report << "Backend: unavailable\n";
+#endif
 
     if (paths.empty())
     {
-        error = "No VST3 folders were found to scan.";
+        error = "No plugin folders were found to scan.";
+        report << error << "\n";
+        scanReport = report.str();
         return static_cast<int>(discoveredPlugins.size());
     }
+
+    report << "Folders:\n";
+    for (const auto& path : paths)
+        report << "  " << path << "\n";
 
 #if ELKA_ENABLE_JUCE_PLUGIN_HOST
     std::vector<PluginSummary> keptSummaries;
     std::vector<juce::PluginDescription> keptDescriptions;
 
-    for (size_t index = 0; index < impl->descriptions.size(); ++index)
+    if (append)
     {
-        const auto& description = impl->descriptions[index];
-        if (pluginIsInAnyPath(description, paths))
-            continue;
+        for (size_t index = 0; index < impl->descriptions.size(); ++index)
+        {
+            const auto& description = impl->descriptions[index];
+            if (pluginIsInAnyPath(description, paths))
+                continue;
 
-        if (!pluginFileExists(description))
-            continue;
+            if (!pluginFileExists(description))
+                continue;
 
-        keptDescriptions.push_back(description);
-        keptSummaries.push_back(toSummary(description));
+            keptDescriptions.push_back(description);
+            keptSummaries.push_back(toSummary(description));
+        }
     }
 
     impl->descriptions = std::move(keptDescriptions);
@@ -383,42 +570,24 @@ int PluginHostLayer::scanVst3Paths(const std::vector<std::string>& paths, bool a
     std::set<std::string> seen;
 
     for (const auto& existing : discoveredPlugins)
-        seen.insert(existing.name + "|" + existing.fileOrIdentifier);
+        seen.insert(pluginKey(existing));
 
-    for (const auto& path : paths)
-    {
-        if (!std::filesystem::is_directory(std::filesystem::path(path)))
-            continue;
+    scanFormatIntoList(vst3Format, paths, seen, discoveredPlugins, impl->descriptions, report);
 
-        juce::FileSearchPath searchPath(juce::String::fromUTF8(path.c_str()));
-
-        for (const auto& fileOrIdentifier : vst3Format.searchPathsForPlugins(searchPath, true, false))
-        {
-            juce::OwnedArray<juce::PluginDescription> found;
-            vst3Format.findAllTypesForFile(found, fileOrIdentifier);
-
-            for (const auto* description : found)
-            {
-                if (description == nullptr)
-                    continue;
-
-                const auto summary = toSummary(*description);
-                const auto key = summary.name + "|" + summary.fileOrIdentifier;
-
-                if (seen.insert(key).second)
-                {
-                    discoveredPlugins.push_back(summary);
-                    impl->descriptions.push_back(*description);
-                }
-            }
-        }
-    }
+#if ELKA_ENABLE_VST2_HOST && JUCE_INTERNAL_HAS_VST
+    juce::VSTPluginFormatHeadless vstFormat;
+    scanFormatIntoList(vstFormat, paths, seen, discoveredPlugins, impl->descriptions, report);
+#endif
 
     saveCachedPlugins();
 
+    report << "Plugin scan complete: " << discoveredPlugins.size() << " plugin(s).\n";
+    scanReport = report.str();
     return static_cast<int>(discoveredPlugins.size());
 #else
     error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    report << error << "\n";
+    scanReport = report.str();
     return 0;
 #endif
 }
@@ -429,12 +598,15 @@ void PluginHostLayer::loadCachedPlugins()
     discoveredPlugins.clear();
     impl->descriptions.clear();
 
-    const auto file = pluginCacheFile();
+    auto file = pluginCacheFile();
+    if (!file.existsAsFile())
+        file = legacyPluginCacheFile();
+
     if (!file.existsAsFile())
         return;
 
     auto root = juce::XmlDocument::parse(file);
-    if (root == nullptr || !root->hasTagName("ELKA_VST3_CACHE"))
+    if (root == nullptr || (!root->hasTagName("ELKA_PLUGIN_CACHE") && !root->hasTagName("ELKA_VST3_CACHE")))
         return;
 
     std::set<std::string> seen;
@@ -448,7 +620,7 @@ void PluginHostLayer::loadCachedPlugins()
             continue;
 
         const auto summary = toSummary(description);
-        const auto key = summary.name + "|" + summary.fileOrIdentifier;
+        const auto key = pluginKey(summary);
         if (!seen.insert(key).second)
             continue;
 
@@ -464,7 +636,7 @@ void PluginHostLayer::saveCachedPlugins() const
     auto file = pluginCacheFile();
     file.getParentDirectory().createDirectory();
 
-    juce::XmlElement root("ELKA_VST3_CACHE");
+    juce::XmlElement root("ELKA_PLUGIN_CACHE");
     for (const auto& description : impl->descriptions)
     {
         auto xml = description.createXml();
@@ -494,9 +666,8 @@ bool PluginHostLayer::loadDiscoveredPlugin(size_t index, int sampleRate, int max
 
     impl->editorWindow.reset();
 
-    juce::VST3PluginFormat vst3Format;
     juce::String creationError;
-    auto instance = vst3Format.createInstanceFromDescription(
+    auto instance = createPluginInstanceForDescription(
         description,
         static_cast<double>(preparedSampleRate),
         preparedBlockSize,
@@ -506,7 +677,7 @@ bool PluginHostLayer::loadDiscoveredPlugin(size_t index, int sampleRate, int max
     {
         error = creationError.isNotEmpty()
             ? creationError.toStdString()
-            : "JUCE could not create the selected VST3 instance.";
+            : "JUCE could not create the selected plugin instance.";
         return false;
     }
 
@@ -594,9 +765,8 @@ int PluginHostLayer::addDiscoveredPluginNode(
     const int requestedSidechainPins = std::clamp(sidechainInputPins, 0, 32 - requestedMainInputPins);
     const int requestedOutputPins = std::clamp(outputPins, 1, 32);
 
-    juce::VST3PluginFormat vst3Format;
     juce::String creationError;
-    auto instance = vst3Format.createInstanceFromDescription(
+    auto instance = createPluginInstanceForDescription(
         description,
         static_cast<double>(preparedSampleRate),
         preparedBlockSize,
@@ -606,7 +776,7 @@ int PluginHostLayer::addDiscoveredPluginNode(
     {
         error = creationError.isNotEmpty()
             ? creationError.toStdString()
-            : "JUCE could not create the selected VST3 instance.";
+            : "JUCE could not create the selected plugin instance.";
         return -1;
     }
 
@@ -1124,5 +1294,10 @@ const std::vector<PluginSummary>& PluginHostLayer::plugins() const noexcept
 const std::string& PluginHostLayer::lastError() const noexcept
 {
     return error;
+}
+
+const std::string& PluginHostLayer::lastScanReport() const noexcept
+{
+    return scanReport;
 }
 }

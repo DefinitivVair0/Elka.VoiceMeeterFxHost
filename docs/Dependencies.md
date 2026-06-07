@@ -14,7 +14,9 @@ No VoiceMeeter import library is required for Phase 1.
 
 - JUCE 8 or newer recommended.
 - VST3 hosting/discovery via JUCE.
-- VST2 hosting only if valid VST2 SDK headers are available locally.
+- VST2 hosting only if valid VST2 SDK headers are available locally. The build
+  expects a folder containing `pluginterfaces\vst2.x\aeffect.h`; see
+  `docs/VST2Workflow.md`.
 
 The project is organized so JUCE can be added under:
 

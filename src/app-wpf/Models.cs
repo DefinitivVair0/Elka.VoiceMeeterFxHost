@@ -177,7 +177,14 @@ internal sealed class EndpointChannelSettings
         RouteEnabled = new bool[endpoint.ChannelCount];
         RouteMuteNormal = new bool[endpoint.ChannelCount];
         RouteDestinations = Enumerable.Range(0, endpoint.ChannelCount)
-            .Select(_ => new List<RouteDestinationSnapshot> { new() })
+            .Select(offset => new List<RouteDestinationSnapshot>
+            {
+                new()
+                {
+                    BusIndex = 0,
+                    ChannelOffset = Math.Min(offset, 7)
+                }
+            })
             .ToArray();
     }
 
@@ -348,6 +355,11 @@ internal sealed class FxHostSettings
     public CallbackMode SelectedMode { get; set; } = CallbackMode.Input;
     public string? SelectedEndpointName { get; set; }
     public string PluginSearchText { get; set; } = string.Empty;
+    public List<string> PluginScanFolders { get; set; } = [];
+    public bool VbanControlEnabled { get; set; }
+    public int VbanControlPort { get; set; } = 6981;
+    public string VbanControlStreamName { get; set; } = "Command1";
+    public bool VbanControlLocalOnly { get; set; } = true;
     public List<ChannelSettingsSnapshot> Endpoints { get; set; } = [];
     public List<PluginNodeSnapshot> PluginNodes { get; set; } = [];
     public List<CanvasConnectionSnapshot> CanvasConnections { get; set; } = [];
@@ -410,7 +422,7 @@ internal sealed class NativeEngineClient : IDisposable
 
     public NativeEngineClient()
     {
-        var status = new StringBuilder(512);
+        var status = new StringBuilder(65536);
         try
         {
             _attached = ElkaFx_Initialize(status, status.Capacity) == 0;
@@ -482,7 +494,7 @@ internal sealed class NativeEngineClient : IDisposable
         return plugins;
     }
 
-    public string ScanDefaultVst3()
+    public string ScanPlugins(IEnumerable<string> customFolders)
     {
         if (!_attached)
         {
@@ -490,7 +502,11 @@ internal sealed class NativeEngineClient : IDisposable
         }
 
         var status = new StringBuilder(512);
-        var result = ElkaFx_ScanDefaultVst3(status, status.Capacity);
+        var folderText = string.Join(";", customFolders
+            .Where(static folder => !string.IsNullOrWhiteSpace(folder))
+            .Select(static folder => folder.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase));
+        var result = ElkaFx_ScanPluginFolders(folderText, includeDefaults: 1, status, status.Capacity);
         _lastStatus = status.ToString();
         return result >= 0 ? _lastStatus : $"Scan failed: {_lastStatus}";
     }
@@ -758,6 +774,13 @@ internal sealed class NativeEngineClient : IDisposable
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_ScanDefaultVst3(StringBuilder status, int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_ScanPluginFolders(
+        string folders,
+        int includeDefaults,
+        StringBuilder status,
+        int statusChars);
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_AddPluginNode(

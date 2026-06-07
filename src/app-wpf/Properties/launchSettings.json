@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "Elka VoiceMeeter FX Host": {
+      "commandName": "Project",
+      "nativeDebugging": false,
+      "environmentVariables": {
+        "DOTNET_EnableDiagnostics": "1"
+      }
+    }
+  }
+}

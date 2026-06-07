@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -14,6 +15,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _saveTimer;
     private readonly DispatcherTimer _statusTimer;
     private readonly DispatcherTimer _channelApplyTimer;
+    private VbanTextListener? _vbanTextListener;
+    private VfxCommandsWindow? _vfxCommandsWindow;
     private FxHostSettings _settings = new();
     private VoicemeeterKind _kind = VoicemeeterKind.Potato;
     private CallbackMode _selectedMode = CallbackMode.Input;
@@ -41,6 +44,8 @@ public partial class MainWindow : Window
     private bool _endpointDragMoved;
     private int? _selectedPluginNodeSlot;
 
+    private const int DefaultVbanControlPort = 6981;
+    private const string DefaultVbanControlStreamName = "Command1";
     private const string PinEndpointSource = "endpoint-source";
     private const string PinEndpointDestination = "endpoint-destination";
     private const string PinNodeInput = "node-input";
@@ -94,6 +99,14 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromMilliseconds(30)
         };
         _channelApplyTimer.Tick += (_, _) => ApplyQueuedChannelChanges();
+        VbanEnableCheckBox.Checked += VbanControl_Changed;
+        VbanEnableCheckBox.Unchecked += VbanControl_Changed;
+        VbanLocalOnlyCheckBox.Checked += VbanControl_Changed;
+        VbanLocalOnlyCheckBox.Unchecked += VbanControl_Changed;
+        VbanPortTextBox.LostFocus += VbanControl_LostFocus;
+        VbanStreamTextBox.LostFocus += VbanControl_LostFocus;
+        VbanPortTextBox.KeyDown += VbanControl_KeyDown;
+        VbanStreamTextBox.KeyDown += VbanControl_KeyDown;
         VstWorkspaceView.SizeChanged += (_, _) =>
         {
             if (_workspaceView == WorkspaceView.Vst)
@@ -106,6 +119,7 @@ public partial class MainWindow : Window
         PopulatePluginList();
         SelectMode(_selectedMode);
         SelectWorkspaceView(WorkspaceView.Vst);
+        ApplyVbanControlSettingsFromUi(showErrors: false);
         AppendLog("Ready.");
         AppendLog(_engine.StatusText);
         _statusTimer.Start();
@@ -167,11 +181,59 @@ public partial class MainWindow : Window
         QueueSave();
     }
 
-
-    private void ScanButton_Click(object sender, RoutedEventArgs e)
+    private void AddPluginFolderButton_Click(object sender, RoutedEventArgs e)
     {
-        AppendLog(_engine.ScanDefaultVst3());
-        PopulatePluginList();
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Select a VST plugin folder to scan"
+        };
+
+        if (dialog.ShowDialog(this) != true || string.IsNullOrWhiteSpace(dialog.FolderName))
+        {
+            return;
+        }
+
+        AddPluginScanFolder(dialog.FolderName);
+    }
+
+    private void RemovePluginFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (PluginFoldersListBox.SelectedItem is not string folder)
+        {
+            return;
+        }
+
+        _settings.PluginScanFolders.RemoveAll(item => string.Equals(item, folder, StringComparison.OrdinalIgnoreCase));
+        PopulatePluginFolderList();
+        QueueSave();
+        AppendLog($"Removed plugin scan folder: {folder}");
+    }
+
+    private void PluginFoldersListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        RemovePluginFolderButton.IsEnabled = PluginFoldersListBox.SelectedItem is not null;
+    }
+
+    private async void ScanButton_Click(object sender, RoutedEventArgs e)
+    {
+        var folders = _settings.PluginScanFolders.ToArray();
+        ScanButton.IsEnabled = false;
+        AppendLog("Plugin scan started. The window can stay open while JUCE checks the plugin folders.");
+
+        try
+        {
+            var result = await Task.Run(() => _engine.ScanPlugins(folders));
+            AppendLog(result);
+            PopulatePluginList();
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Plugin scan failed: {ex.Message}");
+        }
+        finally
+        {
+            ScanButton.IsEnabled = true;
+        }
     }
 
     private void SinglePingButton_Click(object sender, RoutedEventArgs e)
@@ -181,6 +243,28 @@ public partial class MainWindow : Window
             Owner = this
         };
         window.Show();
+    }
+
+    private void OpenVfxCommandsButton_Click(object sender, RoutedEventArgs e)
+    {
+        OpenVfxCommandsWindow();
+    }
+
+    private void OpenVfxCommandsWindow()
+    {
+        if (_vfxCommandsWindow is { IsVisible: true } existingWindow)
+        {
+            existingWindow.Activate();
+            return;
+        }
+
+        _vfxCommandsWindow = new VfxCommandsWindow
+        {
+            Owner = this
+        };
+        _vfxCommandsWindow.Closed += (_, _) => _vfxCommandsWindow = null;
+        _vfxCommandsWindow.Show();
+        _vfxCommandsWindow.Activate();
     }
 
     private void SaveButton_Click(object sender, RoutedEventArgs e)
@@ -241,11 +325,20 @@ public partial class MainWindow : Window
             _settings.Endpoints ??= [];
             _settings.PluginNodes ??= [];
             _settings.CanvasConnections ??= [];
+            _settings.PluginScanFolders ??= [];
             _settings.EndpointCanvasYOffsets ??= [];
             _settings.EndpointRouteHues ??= [];
+            NormalizePluginScanFolders();
             _kind = _settings.Kind == VoicemeeterKind.Unknown ? VoicemeeterKind.Potato : _settings.Kind;
             _selectedMode = _settings.SelectedMode == CallbackMode.None ? CallbackMode.Input : _settings.SelectedMode;
             PluginSearchTextBox.Text = _settings.PluginSearchText;
+            PopulatePluginFolderList();
+            VbanEnableCheckBox.IsChecked = _settings.VbanControlEnabled;
+            VbanPortTextBox.Text = SanitizeVbanControlPort(_settings.VbanControlPort).ToString(CultureInfo.InvariantCulture);
+            VbanStreamTextBox.Text = string.IsNullOrWhiteSpace(_settings.VbanControlStreamName)
+                ? DefaultVbanControlStreamName
+                : _settings.VbanControlStreamName.Trim();
+            VbanLocalOnlyCheckBox.IsChecked = _settings.VbanControlLocalOnly;
             MixerTypeTextBlock.Text = VoicemeeterKindInfo.DisplayName(_kind);
             StatusTextBlock.Text = _engine.StatusText;
 
@@ -277,6 +370,13 @@ public partial class MainWindow : Window
         _settings.SelectedMode = _selectedMode;
         _settings.SelectedEndpointName = _selectedEndpoint?.Name;
         _settings.PluginSearchText = PluginSearchTextBox.Text;
+        NormalizePluginScanFolders();
+        _settings.VbanControlEnabled = VbanEnableCheckBox.IsChecked == true;
+        _settings.VbanControlPort = ParseVbanControlPortOrDefault();
+        _settings.VbanControlStreamName = string.IsNullOrWhiteSpace(VbanStreamTextBox.Text)
+            ? DefaultVbanControlStreamName
+            : VbanStreamTextBox.Text.Trim();
+        _settings.VbanControlLocalOnly = VbanLocalOnlyCheckBox.IsChecked != false;
         _settings.Endpoints = _settingsByEndpoint.Values
             .Select(static settings => settings.ToSnapshot())
             .ToList();
@@ -292,6 +392,485 @@ public partial class MainWindow : Window
 
         _saveTimer.Stop();
         _saveTimer.Start();
+    }
+
+    private void AddPluginScanFolder(string folder)
+    {
+        var normalized = NormalizePluginFolderPath(folder);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return;
+        }
+
+        if (!System.IO.Directory.Exists(normalized))
+        {
+            AppendLog($"Plugin scan folder does not exist: {normalized}");
+            return;
+        }
+
+        if (_settings.PluginScanFolders.Any(existing => string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase)))
+        {
+            PluginFoldersListBox.SelectedItem = _settings.PluginScanFolders.First(existing =>
+                string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase));
+            AppendLog($"Plugin scan folder already listed: {normalized}");
+            return;
+        }
+
+        _settings.PluginScanFolders.Add(normalized);
+        NormalizePluginScanFolders();
+        PopulatePluginFolderList();
+        PluginFoldersListBox.SelectedItem = normalized;
+        QueueSave();
+        AppendLog($"Added plugin scan folder: {normalized}");
+    }
+
+    private void PopulatePluginFolderList()
+    {
+        PluginFoldersListBox.Items.Clear();
+        foreach (var folder in _settings.PluginScanFolders)
+        {
+            PluginFoldersListBox.Items.Add(folder);
+        }
+
+        RemovePluginFolderButton.IsEnabled = PluginFoldersListBox.SelectedItem is not null;
+    }
+
+    private void NormalizePluginScanFolders()
+    {
+        _settings.PluginScanFolders = _settings.PluginScanFolders
+            .Where(static folder => !string.IsNullOrWhiteSpace(folder))
+            .Select(NormalizePluginFolderPath)
+            .Where(static folder => !string.IsNullOrWhiteSpace(folder))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static folder => folder, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string NormalizePluginFolderPath(string folder)
+    {
+        try
+        {
+            return System.IO.Path.GetFullPath(folder.Trim()).TrimEnd(
+                System.IO.Path.DirectorySeparatorChar,
+                System.IO.Path.AltDirectorySeparatorChar);
+        }
+        catch
+        {
+            return folder.Trim();
+        }
+    }
+
+    private void VbanControl_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loading)
+        {
+            return;
+        }
+
+        ApplyVbanControlSettingsFromUi(showErrors: true);
+        QueueSave();
+    }
+
+    private void VbanControl_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (_loading)
+        {
+            return;
+        }
+
+        ApplyVbanControlSettingsFromUi(showErrors: true);
+        QueueSave();
+    }
+
+    private void VbanControl_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        Keyboard.ClearFocus();
+        ApplyVbanControlSettingsFromUi(showErrors: true);
+        QueueSave();
+        e.Handled = true;
+    }
+
+    private void ApplyVbanControlSettingsFromUi(bool showErrors)
+    {
+        try
+        {
+            var enabled = VbanEnableCheckBox.IsChecked == true;
+            var port = ParseVbanControlPort(VbanPortTextBox.Text);
+            var streamName = string.IsNullOrWhiteSpace(VbanStreamTextBox.Text)
+                ? DefaultVbanControlStreamName
+                : VbanStreamTextBox.Text.Trim();
+            var localOnly = VbanLocalOnlyCheckBox.IsChecked != false;
+
+            VbanPortTextBox.Text = port.ToString(CultureInfo.InvariantCulture);
+            VbanStreamTextBox.Text = streamName;
+            RestartVbanTextListener(enabled, port, streamName, localOnly);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"VBAN control error: {ex.Message}");
+            UpdateVbanControlStatus("VBAN control error");
+            if (showErrors)
+            {
+                MessageBox.Show(this, ex.Message, "Elka VoiceMeeter FX Host", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+
+    private void RestartVbanTextListener(bool enabled, int port, string streamName, bool localOnly)
+    {
+        if (_vbanTextListener is not null
+            && _vbanTextListener.Port == port
+            && string.Equals(_vbanTextListener.StreamName, streamName, StringComparison.OrdinalIgnoreCase)
+            && _vbanTextListener.LocalOnly == localOnly
+            && enabled)
+        {
+            UpdateVbanControlStatus($"VBAN listening {port} / {streamName}");
+            return;
+        }
+
+        _vbanTextListener?.Dispose();
+        _vbanTextListener = null;
+
+        if (!enabled)
+        {
+            UpdateVbanControlStatus("VBAN off");
+            return;
+        }
+
+        _vbanTextListener = new VbanTextListener(
+            port,
+            streamName,
+            localOnly,
+            message => Dispatcher.InvokeAsync(() => HandleVbanTextMessage(message)),
+            diagnostic => Dispatcher.InvokeAsync(() =>
+            {
+                UpdateVbanControlStatus("VBAN packet ignored");
+                AppendLog(diagnostic);
+            }));
+        UpdateVbanControlStatus($"VBAN listening {port} / {streamName}");
+        AppendLog($"VBAN text control listening on port {port}, stream {streamName}, {(localOnly ? "local only" : "LAN allowed")}.");
+    }
+
+    private void UpdateVbanControlStatus(string text)
+    {
+        VbanStatusTextBlock.Text = text;
+    }
+
+    private int ParseVbanControlPortOrDefault()
+    {
+        try
+        {
+            return ParseVbanControlPort(VbanPortTextBox.Text);
+        }
+        catch
+        {
+            return DefaultVbanControlPort;
+        }
+    }
+
+    private static int ParseVbanControlPort(string text)
+    {
+        if (!int.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port)
+            || port is < 1 or > 65535)
+        {
+            throw new InvalidOperationException("VBAN control port must be between 1 and 65535.");
+        }
+
+        return port;
+    }
+
+    private static int SanitizeVbanControlPort(int port)
+    {
+        return port is >= 1 and <= 65535
+            ? port
+            : DefaultVbanControlPort;
+    }
+
+    private void HandleVbanTextMessage(VbanTextMessage message)
+    {
+        try
+        {
+            var commands = VfxTextCommandParser.ParseScript(message.Text);
+            if (commands.Count == 0)
+            {
+                return;
+            }
+
+            var selectedEndpointChanged = false;
+            foreach (var command in commands)
+            {
+                selectedEndpointChanged |= ApplyVfxTextCommand(command);
+            }
+
+            RefreshEndpointButtonSelection();
+            if (selectedEndpointChanged && _workspaceView == WorkspaceView.Channels)
+            {
+                BuildChannelStrips();
+            }
+            else if (_workspaceView == WorkspaceView.Vst)
+            {
+                RebuildRoutingCanvas();
+            }
+            else
+            {
+                BuildCrossRoutingPanel();
+            }
+
+            FlushQueuedChannelChanges();
+            QueueSave();
+            AppendLog($"VFX text {message.RemoteAddress} {message.StreamName}: applied {commands.Count} command(s).");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"VFX text command error from {message.RemoteAddress}: {ex.Message}");
+        }
+    }
+
+    private bool ApplyVfxTextCommand(VfxTextCommand command)
+    {
+        if (command.Property is VfxTextCommandProperty.Route or VfxTextCommandProperty.RouteEnable or VfxTextCommandProperty.RouteMuteNormal
+            && command.TargetKind != VfxTextCommandTargetKind.Strip)
+        {
+            throw new InvalidOperationException($"{command.SourceText}: route commands only support Strip targets.");
+        }
+
+        var mode = command.TargetKind == VfxTextCommandTargetKind.Strip
+            ? CallbackMode.Input
+            : CallbackMode.Output;
+        var endpoint = ResolveVfxEndpoint(command);
+        var settings = GetOrCreateChannelSettings(mode, endpoint);
+        var offsets = command.Channels.GetZeroBasedChannels(endpoint.ChannelCount).ToArray();
+        if (offsets.Length == 0)
+        {
+            throw new InvalidOperationException($"{command.SourceText}: no matching channel in {endpoint.Name}.");
+        }
+
+        foreach (var offset in offsets)
+        {
+            ApplyVfxTextCommandToChannel(settings, offset, command);
+        }
+
+        QueueChannelApply(settings);
+        return _selectedChannelSettings?.Key == settings.Key;
+    }
+
+    private IoEndpoint ResolveVfxEndpoint(VfxTextCommand command)
+    {
+        return command.TargetKind == VfxTextCommandTargetKind.Strip
+            ? ResolveVfxStripEndpoint(command.Target)
+            : ResolveVfxBusEndpoint(command.Target);
+    }
+
+    private IoEndpoint ResolveVfxStripEndpoint(string targetText)
+    {
+        var endpoints = VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind);
+        var target = targetText.Trim();
+        if (int.TryParse(target, NumberStyles.Integer, CultureInfo.InvariantCulture, out var stripIndex))
+        {
+            if (stripIndex >= 0 && stripIndex < endpoints.Count)
+            {
+                return endpoints[stripIndex];
+            }
+
+            throw new InvalidOperationException($"Strip({stripIndex}) is not available for {VoicemeeterKindInfo.DisplayName(_kind)}.");
+        }
+
+        var normalizedTarget = NormalizeEndpointText(target);
+        var namedEndpoint = endpoints.FirstOrDefault(endpoint =>
+            string.Equals(NormalizeEndpointText(endpoint.Name), normalizedTarget, StringComparison.OrdinalIgnoreCase));
+        return namedEndpoint
+            ?? throw new InvalidOperationException($"Unknown strip target: {targetText}");
+    }
+
+    private IoEndpoint ResolveVfxBusEndpoint(string targetText)
+    {
+        var endpoints = VoicemeeterIoLayout.GetEndpoints(CallbackMode.Output, _kind);
+        var target = targetText.Trim();
+        if (int.TryParse(target, NumberStyles.Integer, CultureInfo.InvariantCulture, out var busIndex))
+        {
+            if (busIndex >= 0 && busIndex < endpoints.Count)
+            {
+                return endpoints[busIndex];
+            }
+
+            throw new InvalidOperationException($"Bus({busIndex}) is not available for {VoicemeeterKindInfo.DisplayName(_kind)}.");
+        }
+
+        var label = target.ToUpperInvariant();
+        var endpoint = endpoints.FirstOrDefault(item =>
+            item.Name.StartsWith(label + " ", StringComparison.OrdinalIgnoreCase)
+            || item.Name.StartsWith(label + " /", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(NormalizeEndpointText(item.Name), NormalizeEndpointText(label), StringComparison.OrdinalIgnoreCase));
+        return endpoint
+            ?? throw new InvalidOperationException($"Unknown bus target: {targetText}");
+    }
+
+    private void ApplyVfxTextCommandToChannel(EndpointChannelSettings settings, int offset, VfxTextCommand command)
+    {
+        switch (command.Property)
+        {
+            case VfxTextCommandProperty.Enable:
+                if (command.Operator != VfxTextCommandOperator.Set)
+                {
+                    throw new InvalidOperationException("Enable only supports '='.");
+                }
+
+                settings.Enabled[offset] = VfxTextCommandParser.ParseBoolean(command.ValueText);
+                break;
+
+            case VfxTextCommandProperty.Delay:
+                settings.DelayMilliseconds[offset] = ApplyNumericVfxCommand(
+                    currentValue: settings.DelayMilliseconds[offset],
+                    command,
+                    valueName: "Delay",
+                    sanitize: static value => Math.Round(Math.Clamp(value, 0.0, 10_000.0)));
+                break;
+
+            case VfxTextCommandProperty.Volume:
+                settings.VolumePercent[offset] = ApplyNumericVfxCommand(
+                    currentValue: settings.VolumePercent[offset],
+                    command,
+                    valueName: "Volume",
+                    sanitize: static value => Math.Round(Math.Clamp(value, 0.0, 200.0)));
+                break;
+
+            case VfxTextCommandProperty.Route:
+                ApplyVfxRouteDestinationCommand(settings, offset, command);
+                break;
+
+            case VfxTextCommandProperty.RouteEnable:
+                if (command.Operator != VfxTextCommandOperator.Set)
+                {
+                    throw new InvalidOperationException("RouteEnable only supports '='.");
+                }
+
+                settings.RouteEnabled[offset] = VfxTextCommandParser.ParseBoolean(command.ValueText);
+                if (settings.RouteEnabled[offset] && settings.RouteDestinations[offset].Count == 0)
+                {
+                    settings.RouteDestinations[offset].Add(DefaultRouteDestination(offset));
+                }
+
+                break;
+
+            case VfxTextCommandProperty.RouteMuteNormal:
+                if (command.Operator != VfxTextCommandOperator.Set)
+                {
+                    throw new InvalidOperationException("MuteNormal only supports '='.");
+                }
+
+                settings.RouteMuteNormal[offset] = VfxTextCommandParser.ParseBoolean(command.ValueText);
+                break;
+        }
+    }
+
+    private void ApplyVfxRouteDestinationCommand(EndpointChannelSettings settings, int offset, VfxTextCommand command)
+    {
+        var destinationText = VfxTextCommandParser.ParseRouteDestination(command.ValueText);
+        var bus = ResolveVfxBusEndpoint(destinationText.BusTarget);
+        var destinationOffset = destinationText.OneBasedChannel - 1;
+        if (destinationOffset < 0 || destinationOffset >= bus.ChannelCount)
+        {
+            throw new InvalidOperationException($"{command.SourceText}: {bus.Name} has {bus.ChannelCount} channel(s).");
+        }
+
+        var destination = new RouteDestinationSnapshot
+        {
+            BusIndex = GetVfxBusIndex(bus),
+            ChannelOffset = destinationOffset
+        };
+        var destinations = settings.RouteDestinations[offset];
+
+        switch (command.Operator)
+        {
+            case VfxTextCommandOperator.Set:
+                destinations.Clear();
+                destinations.Add(destination);
+                settings.RouteEnabled[offset] = true;
+                break;
+
+            case VfxTextCommandOperator.Add:
+                if (!settings.RouteEnabled[offset]
+                    && destinations.Count == 1
+                    && IsDefaultRouteDestination(offset, destinations[0]))
+                {
+                    destinations.Clear();
+                }
+
+                if (!destinations.Any(item => item.BusIndex == destination.BusIndex && item.ChannelOffset == destination.ChannelOffset))
+                {
+                    destinations.Add(destination);
+                }
+
+                settings.RouteEnabled[offset] = true;
+                break;
+
+            case VfxTextCommandOperator.Subtract:
+                destinations.RemoveAll(item => item.BusIndex == destination.BusIndex && item.ChannelOffset == destination.ChannelOffset);
+                if (destinations.Count == 0)
+                {
+                    settings.RouteEnabled[offset] = false;
+                }
+
+                break;
+        }
+    }
+
+    private int GetVfxBusIndex(IoEndpoint bus)
+    {
+        var endpoints = VoicemeeterIoLayout.GetEndpoints(CallbackMode.Output, _kind);
+        for (var index = 0; index < endpoints.Count; index++)
+        {
+            if (string.Equals(endpoints[index].Name, bus.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                return index;
+            }
+        }
+
+        throw new InvalidOperationException($"Unknown route bus: {bus.Name}");
+    }
+
+    private static double ApplyNumericVfxCommand(
+        double currentValue,
+        VfxTextCommand command,
+        string valueName,
+        Func<double, double> sanitize)
+    {
+        var value = VfxTextCommandParser.ParseNumber(command.ValueText, valueName);
+        var result = command.Operator switch
+        {
+            VfxTextCommandOperator.Add => currentValue + value,
+            VfxTextCommandOperator.Subtract => currentValue - value,
+            _ => value
+        };
+
+        return sanitize(result);
+    }
+
+    private static RouteDestinationSnapshot DefaultRouteDestination(int sourceOffset)
+    {
+        return new RouteDestinationSnapshot
+        {
+            BusIndex = 0,
+            ChannelOffset = Math.Min(sourceOffset, 7)
+        };
+    }
+
+    private static bool IsDefaultRouteDestination(int sourceOffset, RouteDestinationSnapshot destination)
+    {
+        return destination.BusIndex == 0 && destination.ChannelOffset == Math.Min(sourceOffset, 7);
+    }
+
+    private static string NormalizeEndpointText(string text)
+    {
+        return text.Replace(" ", string.Empty, StringComparison.Ordinal)
+            .Replace("/", string.Empty, StringComparison.Ordinal)
+            .Replace("-", string.Empty, StringComparison.Ordinal)
+            .Trim();
     }
 
     private void QueueChannelApply(EndpointChannelSettings settings)
@@ -3065,6 +3644,8 @@ public partial class MainWindow : Window
         _channelApplyTimer.Stop();
         _statusTimer.Stop();
         _saveTimer.Stop();
+        _vbanTextListener?.Dispose();
+        _vfxCommandsWindow?.Close();
         _engine.Dispose();
         base.OnClosed(e);
     }

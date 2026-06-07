@@ -22,6 +22,10 @@ In Visual Studio, use the publish profile:
 src\app-wpf\Properties\PublishProfiles\win-x64-framework-dependent.pubxml
 ```
 
+That profile creates the release EXE/ZIP and uploads both files to the GitHub
+release automatically. The default release tag is `v$(Version)` from the app
+project, for example `v0.2.0`.
+
 This creates:
 
 ```text
@@ -40,6 +44,21 @@ After the GitHub repo exists and `gh auth login` has been completed:
 
 The script publishes locally first, then creates the release if it does not
 exist, and uploads both the zip and the standalone EXE with `--clobber`.
+
+Visual Studio uses the same idea directly from the publish profile. Before using
+the VS Publish button for upload, make sure GitHub CLI is installed and logged
+in:
+
+```powershell
+gh auth login
+```
+
+To test the Visual Studio publish profile without uploading, set this MSBuild
+property in the publish command or profile:
+
+```powershell
+-p:ElkaUploadGitHubRelease=false
+```
 
 ## Manual Publish Command
 

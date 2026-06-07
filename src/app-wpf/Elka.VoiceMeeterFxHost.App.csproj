@@ -4,6 +4,7 @@
     <Version>0.2.0</Version>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <StartupObject>Elka.VoiceMeeterFxHost.App.Program</StartupObject>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PlatformTarget>x64</PlatformTarget>
@@ -16,6 +17,10 @@
     <NativeBuildPreset Condition="'$(NativeBuildPreset)' == ''">debug</NativeBuildPreset>
     <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))</RepoRoot>
     <NativeBridgePath>$(RepoRoot)\build-vs2019\$(NativeBuildConfiguration)\ElkaVoiceMeeterFxHost.Native.dll</NativeBridgePath>
+    <Vst2SdkPath Condition="'$(Vst2SdkPath)' == '' and '$(ELKA_VST2_SDK_PATH)' != ''">$(ELKA_VST2_SDK_PATH)</Vst2SdkPath>
+    <Vst2SdkPath Condition="'$(Vst2SdkPath)' == '' and Exists('$(RepoRoot)\external\VST2_SDK\pluginterfaces\vst2.x\aeffect.h')">$(RepoRoot)\external\VST2_SDK</Vst2SdkPath>
+    <NativeVst2ConfigureArg Condition="'$(Vst2SdkPath)' != ''">-DELKA_VST2_SDK_PATH=&quot;$(Vst2SdkPath)&quot;</NativeVst2ConfigureArg>
+    <NativeVst2ConfigureArg Condition="'$(NativeVst2ConfigureArg)' == ''">-DELKA_VST2_SDK_PATH=</NativeVst2ConfigureArg>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
@@ -26,10 +31,10 @@
     <Resource Include="Assets\VoicemeeterDelayIconPreview.png" />
   </ItemGroup>
   <Target Name="BuildNativeBridge" BeforeTargets="Build">
+    <Message Importance="high" Text="Configuring native VoiceMeeter bridge: $(NativeVst2ConfigureArg)" />
+    <Exec Command="&quot;$(CMakeExe)&quot; --preset vs2019-x64 $(NativeVst2ConfigureArg)"
+          WorkingDirectory="$(RepoRoot)" />
     <Message Importance="high" Text="Building native VoiceMeeter bridge: $(NativeBuildPreset)" />
-    <Exec Command="&quot;$(CMakeExe)&quot; --preset vs2019-x64"
-          WorkingDirectory="$(RepoRoot)"
-          Condition="!Exists('$(RepoRoot)\build-vs2019\CMakeCache.txt')" />
     <Exec Command="&quot;$(CMakeExe)&quot; --build --preset $(NativeBuildPreset) --target ElkaVoiceMeeterFxHost.Native"
           WorkingDirectory="$(RepoRoot)" />
   </Target>

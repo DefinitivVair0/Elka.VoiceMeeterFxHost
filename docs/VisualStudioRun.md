@@ -10,6 +10,7 @@
 - .NET 8 Desktop Runtime installed on the target PC.
 - VoiceMeeter installed and running for audio callback testing.
 - `external/JUCE` present when VST3 hosting is needed.
+- Optional: a valid local VST2 SDK path. See `docs/VST2Workflow.md`.
 
 ## Open the Solution
 
@@ -35,6 +36,30 @@ src\app-wpf\bin\Debug\net8.0-windows\win-x64\ElkaVoiceMeeterFxHost.Native.dll
 ```
 
 Start VoiceMeeter first, then press `F5` in Visual Studio.
+
+The WPF project re-runs CMake configure before the native bridge build. This is
+intentional: it keeps the native build cache synchronized with the current VST2
+SDK setting instead of leaving stale CMake settings behind.
+
+If the app fails before the main window appears, check:
+
+```text
+%LOCALAPPDATA%\ElkaVoiceMeeterFxHost\startup-crash.log
+```
+
+Startup exceptions are also shown in a message box.
+
+## VST2 SDK
+
+VST2 is optional. The easiest local layout is:
+
+```text
+external\VST2_SDK\pluginterfaces\vst2.x\aeffect.h
+```
+
+If that file exists, the Visual Studio build enables VST2 hosting. For custom
+locations, set `Vst2SdkPath` or `ELKA_VST2_SDK_PATH`; see
+`docs/VST2Workflow.md`.
 
 ## First Test
 

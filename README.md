@@ -23,11 +23,11 @@ orange for VST/plugin work.
 - **Sidechain pins**: add stereo sidechain inputs to plugin nodes and feed them from endpoints or other node outputs.
 - **Route hue colors**: tint endpoints, wires, and connected nodes so related paths are easier to follow.
 - **Single ping tool**: run a basic callback timing/round-trip check.
-- **VBAN control**: planned next, using the command/control style from the VoiceMeeter Delay app.
+- **VFX text commands**: control delay, volume, direct routing, route enable, and mute-standard routing from MacroButtons over VBAN-TEXT.
 
-VST3 is the current working plugin format. The UI and documentation use the
-short label **VST** because VST2 compatibility is planned for the same plugin
-routing area.
+VST3 is the default working plugin format. The UI uses the short label **VST**
+because the same browser and routing area is prepared for legacy VST2 hosting
+when the optional VST2 SDK path is configured at build time.
 
 ## Runtime Requirements
 
@@ -35,7 +35,12 @@ routing area.
 - .NET 8 Desktop Runtime.
 - VoiceMeeter installed and running.
 - `VoicemeeterRemote64.dll` available from the normal VoiceMeeter install path.
-- VST3 plugins installed in normal Windows VST3 locations for scanning.
+- VST3 plugins installed in normal Windows VST3 locations, or in custom folders
+  added from the VST Routing panel.
+- Optional VST2 hosting requires a legacy VST2 SDK folder containing
+  `pluginterfaces/vst2.x/aeffect.h`, configured with `ELKA_VST2_SDK_PATH`
+  or `Vst2SdkPath` before the native bridge is built. See
+  [`docs/VST2Workflow.md`](docs/VST2Workflow.md).
 
 Build, Visual Studio, and release-publish instructions are in
 [`docs/VisualStudioRun.md`](docs/VisualStudioRun.md) and
@@ -139,10 +144,19 @@ the VST node graph.
 
 The **VST Routing** panel on the left is the plugin browser and loaded-node list.
 
-**Search** filters the scanned plugin list by name.
+**Add Folder** opens a folder picker and adds that folder to the saved plugin
+scan list. Use this for custom VST3 folders and, in SDK-enabled builds, VST2
+plugin folders.
 
-**Scan** asks the native plugin host to scan default VST3 locations and refresh
-the available plugin list.
+The text field beside **Add Folder** filters the scanned plugin list by name.
+
+**Scan** asks the native plugin host to scan standard plugin locations plus every
+folder in the saved custom folder list. If the custom list is empty, Scan uses
+the normal system VST locations. When files are added or removed from those
+folders, running Scan refreshes the list and drops missing plugins.
+
+The custom folder list stays saved between launches. Select a folder and click
+**Remove** to stop scanning that folder on the next scan.
 
 **Plugin list** shows scanned plugins. Select a plugin before clicking
 **Add Node**, or double-click a plugin to add it directly.
@@ -252,6 +266,22 @@ rewriting the whole engine.
 **Single Ping** opens a small timing tester. It is used to check callback timing
 and routing behavior without the full round-trip tool from the Delay app.
 
+**VBAN Text** enables the V1 text command listener. It receives MacroButtons
+VBAN-TEXT packets and applies commands with the `VFX` prefix. The default port
+is `6981` and the default stream name is `Command1`, matching the style used in
+the VoiceMeeter Delay app.
+
+**Local only** rejects packets that do not come from the local machine. Leave
+this enabled for normal MacroButtons control from the same PC.
+
+**VFX Commands** opens an in-app command reference. The same examples are also
+available in [`VFX_COMMANDS.md`](VFX_COMMANDS.md).
+
+The V1 command surface intentionally controls only the non-plugin layer:
+channel enable, delay, volume, direct routes, route enable, and mute standard
+routing. VST loading, VST parameters, plugin editors, bypass, and node wiring
+stay controlled from the app UI.
+
 **Save** writes the current WPF layout, selected side, channels, routes, plugin
 nodes, endpoint offsets, and route hue settings.
 
@@ -282,6 +312,8 @@ The app saves:
 - endpoint vertical offsets
 - endpoint route hue colors
 - plugin search text
+- custom plugin scan folders
+- VBAN-TEXT enable, port, stream name, and local-only settings
 
 Settings are stored under the current user's local app data folder. The app is
 designed so UI settings can be changed while the native callback engine keeps
@@ -289,9 +321,12 @@ running.
 
 ## Notes and Limitations
 
-- The current scanner is VST3-focused. VST2 support is planned.
-- VBAN command control is planned and should follow the style of the
-  VoiceMeeter Delay app.
+- VST3 hosting works by default. VST2 scanning/hosting is compiled in only when
+  `ELKA_VST2_SDK_PATH` points to a valid legacy VST2 SDK before configuring the
+  native CMake build. The WPF project automatically re-runs native CMake
+  configure before builds so this setting is not left stale.
+- VFX text commands currently cover delay, volume, direct routing, route enable,
+  and mute-standard routing only. Plugin control is intentionally left out.
 - Faulty plugins can still crash the host process. Separate-process plugin
   sandboxing is a later phase.
 - Some plugins do not support the requested pin layout. If a layout fails, remove

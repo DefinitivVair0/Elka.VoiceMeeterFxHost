@@ -76,8 +76,12 @@ public:
     bool isAvailable() const noexcept;
     std::string backendName() const;
     std::vector<std::string> defaultVst3SearchPaths() const;
+    std::vector<std::string> defaultVst2SearchPaths() const;
+    std::vector<std::string> defaultPluginSearchPaths() const;
     int scanDefaultVst3Locations();
+    int scanDefaultPluginLocations();
     int scanVst3Folder(const std::string& folder);
+    int scanPluginPaths(const std::vector<std::string>& paths, bool append);
     bool loadDiscoveredPlugin(size_t index, int sampleRate, int maxBlockSize, int routeChannelCount);
     void unloadPlugin() noexcept;
     int addDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount);
@@ -99,16 +103,17 @@ public:
     std::vector<PluginNodeSummary> pluginNodes() const;
     const std::vector<PluginSummary>& plugins() const noexcept;
     const std::string& lastError() const noexcept;
+    const std::string& lastScanReport() const noexcept;
 
 private:
     struct Impl;
 
-    int scanVst3Paths(const std::vector<std::string>& paths, bool append);
     void loadCachedPlugins();
     void saveCachedPlugins() const;
 
     std::unique_ptr<Impl> impl;
     std::vector<PluginSummary> discoveredPlugins;
     std::string error;
+    std::string scanReport;
 };
 }

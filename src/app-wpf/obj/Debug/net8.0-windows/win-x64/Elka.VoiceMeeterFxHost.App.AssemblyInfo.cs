@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Elka.VoiceMeeterFxHost.App")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("0.2.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.2.0+28931b2ddc383f41ac806e5fcd8ebc12886db4b0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.2.0+1c3346dc3a40dd2259c31deca1025f08b47a719d")]
 [assembly: System.Reflection.AssemblyProductAttribute("Elka.VoiceMeeterFxHost.App")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Elka.VoiceMeeterFxHost.App")]
 [assembly: System.Reflection.AssemblyVersionAttribute("0.2.0.0")]
