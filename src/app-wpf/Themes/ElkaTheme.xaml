@@ -28,6 +28,10 @@
   <SolidColorBrush x:Key="{x:Static SystemColors.ControlTextBrushKey}" Color="#EDF3F6" />
   <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#22A6B3" />
   <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#061316" />
+  <SolidColorBrush x:Key="{x:Static SystemColors.MenuBrushKey}" Color="#1A2025" />
+  <SolidColorBrush x:Key="{x:Static SystemColors.MenuTextBrushKey}" Color="#EDF3F6" />
+  <SolidColorBrush x:Key="{x:Static SystemColors.MenuHighlightBrushKey}" Color="#14392F" />
+  <SolidColorBrush x:Key="{x:Static SystemColors.MenuBarBrushKey}" Color="#1A2025" />
 
   <Style TargetType="Window">
     <Setter Property="Background" Value="{StaticResource WindowBackgroundBrush}" />
@@ -66,19 +70,129 @@
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource StrokeBrush}" />
     <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Padding" Value="3" />
+    <Setter Property="SnapsToDevicePixels" Value="True" />
+    <Setter Property="HasDropShadow" Value="False" />
+    <Setter Property="OverridesDefaultStyle" Value="True" />
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="{x:Type ContextMenu}">
+          <Border Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="6"
+                  Padding="{TemplateBinding Padding}"
+                  SnapsToDevicePixels="True">
+            <StackPanel IsItemsHost="True"
+                        KeyboardNavigation.DirectionalNavigation="Cycle" />
+          </Border>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="{x:Type Separator}">
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="{x:Type Separator}">
+          <Border Height="1"
+                  Margin="8,4"
+                  Background="{StaticResource StrokeBrush}" />
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
   </Style>
 
   <Style TargetType="{x:Type MenuItem}">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="Padding" Value="12,7" />
-    <Setter Property="MinWidth" Value="170" />
-    <Style.Triggers>
-      <Trigger Property="IsHighlighted" Value="True">
-        <Setter Property="Background" Value="{StaticResource RouteActiveBrush}" />
-        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-      </Trigger>
-    </Style.Triggers>
+    <Setter Property="MinWidth" Value="190" />
+    <Setter Property="SnapsToDevicePixels" Value="True" />
+    <Setter Property="OverridesDefaultStyle" Value="True" />
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="{x:Type MenuItem}">
+          <Grid>
+            <Border x:Name="ItemChrome"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="4">
+              <Grid MinWidth="{TemplateBinding MinWidth}">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="22" />
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="18" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="CheckMark"
+                           Grid.Column="0"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           FontSize="12"
+                           FontWeight="SemiBold"
+                           Foreground="{StaticResource RouteAccentBrush}"
+                           Text="✓"
+                           Visibility="Hidden" />
+                <ContentPresenter Grid.Column="1"
+                                  Margin="0"
+                                  VerticalAlignment="Center"
+                                  ContentSource="Header"
+                                  RecognizesAccessKey="True" />
+                <Path x:Name="SubmenuArrow"
+                      Grid.Column="2"
+                      Width="6"
+                      Height="9"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Center"
+                      Fill="{TemplateBinding Foreground}"
+                      Data="M 0 0 L 4.5 4.5 L 0 9 Z"
+                      Visibility="Hidden" />
+              </Grid>
+            </Border>
+            <Popup x:Name="PART_Popup"
+                   AllowsTransparency="True"
+                   Focusable="False"
+                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                   Placement="Right"
+                   PopupAnimation="Fade">
+              <Border Background="{StaticResource PanelBrush}"
+                      BorderBrush="{StaticResource StrokeBrush}"
+                      BorderThickness="1"
+                      CornerRadius="6"
+                      Padding="3"
+                      SnapsToDevicePixels="True">
+                <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle" />
+              </Border>
+            </Popup>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="Role" Value="TopLevelHeader">
+              <Setter TargetName="PART_Popup" Property="Placement" Value="Bottom" />
+            </Trigger>
+            <Trigger Property="Role" Value="SubmenuHeader">
+              <Setter TargetName="SubmenuArrow" Property="Visibility" Value="Visible" />
+            </Trigger>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="CheckMark" Property="Visibility" Value="Visible" />
+              <Setter TargetName="ItemChrome" Property="BorderBrush" Value="{StaticResource RouteAccentBrush}" />
+            </Trigger>
+            <Trigger Property="IsHighlighted" Value="True">
+              <Setter TargetName="ItemChrome" Property="Background" Value="{StaticResource RouteActiveBrush}" />
+              <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            </Trigger>
+            <Trigger Property="IsSubmenuOpen" Value="True">
+              <Setter TargetName="ItemChrome" Property="Background" Value="{StaticResource RouteActiveBrush}" />
+              <Setter TargetName="ItemChrome" Property="BorderBrush" Value="{StaticResource RouteAccentBrush}" />
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style TargetType="TextBlock">
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />

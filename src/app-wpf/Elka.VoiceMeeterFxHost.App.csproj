@@ -21,6 +21,16 @@
     <Vst2SdkPath Condition="'$(Vst2SdkPath)' == '' and Exists('$(RepoRoot)\external\VST2_SDK\pluginterfaces\vst2.x\aeffect.h')">$(RepoRoot)\external\VST2_SDK</Vst2SdkPath>
     <NativeVst2ConfigureArg Condition="'$(Vst2SdkPath)' != ''">-DELKA_VST2_SDK_PATH=&quot;$(Vst2SdkPath)&quot;</NativeVst2ConfigureArg>
     <NativeVst2ConfigureArg Condition="'$(NativeVst2ConfigureArg)' == ''">-DELKA_VST2_SDK_PATH=</NativeVst2ConfigureArg>
+    <ElkaCreateReleaseArtifacts Condition="'$(ElkaCreateReleaseArtifacts)' == ''">false</ElkaCreateReleaseArtifacts>
+    <ElkaUploadGitHubRelease Condition="'$(ElkaUploadGitHubRelease)' == ''">false</ElkaUploadGitHubRelease>
+    <GitHubRepository Condition="'$(GitHubRepository)' == ''">torment78/Elka.VoiceMeeterFxHost</GitHubRepository>
+    <GitHubReleaseTag Condition="'$(GitHubReleaseTag)' == ''">v$(Version)</GitHubReleaseTag>
+    <ReleaseDir Condition="'$(ReleaseDir)' == ''">$(RepoRoot)\artifacts\release\</ReleaseDir>
+    <PublishOutputDir Condition="'$(PublishOutputDir)' == ''">$(PublishDir)</PublishOutputDir>
+    <PublishedExePath Condition="'$(PublishedExePath)' == ''">$(PublishOutputDir)Elka.VoiceMeeterFxHost.App.exe</PublishedExePath>
+    <ReleaseExePath Condition="'$(ReleaseExePath)' == ''">$(ReleaseDir)ElkaVoiceMeeterFxHost.exe</ReleaseExePath>
+    <ReleaseZipPath Condition="'$(ReleaseZipPath)' == ''">$(ReleaseDir)ElkaVoiceMeeterFxHost-$(RuntimeIdentifier)-framework-dependent.zip</ReleaseZipPath>
+    <ReleaseUploadLogPath Condition="'$(ReleaseUploadLogPath)' == ''">$(ReleaseDir)github-upload.log</ReleaseUploadLogPath>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
@@ -51,5 +61,25 @@
         <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
       </ResolvedFileToPublish>
     </ItemGroup>
+  </Target>
+  <Target Name="ElkaAfterPublishReleaseArtifacts"
+          AfterTargets="Publish"
+          Condition="'$(ElkaCreateReleaseArtifacts)' == 'true'">
+    <Message Importance="high" Text="Creating Elka release artifacts in $(ReleaseDir)" />
+    <MakeDir Directories="$(ReleaseDir)" />
+    <Copy SourceFiles="$(PublishedExePath)"
+          DestinationFiles="$(ReleaseExePath)"
+          OverwriteReadOnlyFiles="true" />
+    <Delete Files="$(ReleaseZipPath)" Condition="Exists('$(ReleaseZipPath)')" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;Compress-Archive -Path '$(PublishOutputDir)*' -DestinationPath '$(ReleaseZipPath)' -Force&quot;" />
+    <Message Importance="high" Text="Release EXE: $(ReleaseExePath)" />
+    <Message Importance="high" Text="Release ZIP: $(ReleaseZipPath)" />
+  </Target>
+  <Target Name="ElkaUploadGitHubReleaseTarget"
+          AfterTargets="ElkaAfterPublishReleaseArtifacts"
+          Condition="'$(ElkaUploadGitHubRelease)' == 'true'">
+    <Message Importance="high" Text="Uploading Elka release artifacts to GitHub release $(GitHubReleaseTag)" />
+    <Message Importance="high" Text="Upload log: $(ReleaseUploadLogPath)" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(RepoRoot)\scripts\upload-release-assets.ps1&quot; -Repository &quot;$(GitHubRepository)&quot; -Tag &quot;$(GitHubReleaseTag)&quot; -ZipPath &quot;$(ReleaseZipPath)&quot; -ExePath &quot;$(ReleaseExePath)&quot; -LogPath &quot;$(ReleaseUploadLogPath)&quot;" />
   </Target>
 </Project>
