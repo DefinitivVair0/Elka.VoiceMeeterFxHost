@@ -3754,7 +3754,7 @@ public partial class MainWindow : Window
                 : FindNodeToEndpointConnection(source.Node.Slot, source.Pin, target.Mode, target.Channel);
             if (existing is null && !CanConnectNodeOutputToEndpoint(source, target))
             {
-                AppendLog("Return VST output to the same VoiceMeeter section that feeds that node.");
+                AppendLog("Return VST output to a writable destination in the same VoiceMeeter callback section.");
                 return;
             }
 
@@ -4015,19 +4015,18 @@ public partial class MainWindow : Window
             return false;
         }
 
-        if (_selectedMode == CallbackMode.Main)
+        if (source.Node.Mode == CallbackMode.Main || _selectedMode == CallbackMode.Main)
         {
             return true;
         }
 
-        var destinationEndpoint = EndpointForChannel(target.Mode, target.Channel);
-        if (destinationEndpoint is null)
+        if (target.Mode != source.Node.Mode)
         {
             return false;
         }
 
-        var allowedEndpointKeys = SourceEndpointKeysForNode(source.Node.Slot, []);
-        return allowedEndpointKeys.Contains(destinationEndpoint.Key(target.Mode));
+        var destinationEndpoint = EndpointForChannel(target.Mode, target.Channel);
+        return destinationEndpoint is not null;
     }
 
     private string? SourceHueKeyForNode(int slot, HashSet<int> visitedSlots)
