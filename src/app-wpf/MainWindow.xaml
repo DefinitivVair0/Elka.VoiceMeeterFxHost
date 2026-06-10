@@ -560,7 +560,8 @@
                         Height="920"
                         Background="{StaticResource FieldBrush}"
                         MouseMove="RoutingCanvas_MouseMove"
-                        MouseLeftButtonUp="RoutingCanvas_MouseLeftButtonUp" />
+                        MouseLeftButtonUp="RoutingCanvas_MouseLeftButtonUp"
+                        MouseRightButtonDown="RoutingCanvas_MouseRightButtonDown" />
               </ScrollViewer>
 
               <Border x:Name="VstRouteViewPanel"

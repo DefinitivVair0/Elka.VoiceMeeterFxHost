@@ -372,7 +372,24 @@ internal sealed class PluginNodeSnapshot
     public int InputPins { get; set; } = 2;
     public int OutputPins { get; set; } = 2;
     public bool Bypassed { get; set; }
+    public bool PinsCollapsed { get; set; }
     public CallbackMode Mode { get; set; } = CallbackMode.Input;
+}
+
+internal sealed class PluginGroupSnapshot
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Name { get; set; } = "VST Group";
+    public CallbackMode Mode { get; set; } = CallbackMode.Input;
+    public int X { get; set; } = 430;
+    public int Y { get; set; } = 120;
+    public int InputPins { get; set; } = 2;
+    public int OutputPins { get; set; } = 2;
+    public bool SidechainPortsEnabled { get; set; }
+    public int SidechainInputPins { get; set; } = 2;
+    public int SidechainOutputPins { get; set; } = 2;
+    public bool PinsCollapsed { get; set; }
+    public List<int> MemberSlots { get; set; } = [];
 }
 
 internal sealed class CanvasConnectionSnapshot
@@ -382,11 +399,13 @@ internal sealed class CanvasConnectionSnapshot
     public string Kind { get; set; } = "route";
     public string FromKind { get; set; } = string.Empty;
     public CallbackMode FromMode { get; set; } = CallbackMode.None;
+    public string FromGroupId { get; set; } = string.Empty;
     public int FromChannel { get; set; } = -1;
     public int FromSlot { get; set; } = -1;
     public int FromPin { get; set; } = -1;
     public string ToKind { get; set; } = string.Empty;
     public CallbackMode ToMode { get; set; } = CallbackMode.None;
+    public string ToGroupId { get; set; } = string.Empty;
     public int ToChannel { get; set; } = -1;
     public int ToSlot { get; set; } = -1;
     public int ToPin { get; set; } = -1;
@@ -406,6 +425,7 @@ internal sealed class FxHostSettings
     public bool VbanControlLocalOnly { get; set; } = true;
     public List<ChannelSettingsSnapshot> Endpoints { get; set; } = [];
     public List<PluginNodeSnapshot> PluginNodes { get; set; } = [];
+    public List<PluginGroupSnapshot> PluginGroups { get; set; } = [];
     public List<CanvasConnectionSnapshot> CanvasConnections { get; set; } = [];
     public Dictionary<string, double> EndpointCanvasYOffsets { get; set; } = [];
     public Dictionary<string, string> EndpointRouteHues { get; set; } = [];

@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, Point> _crossRoutePinPositions = [];
     private readonly HashSet<string> _pendingChannelApplyKeys = [];
     private readonly Dictionary<int, List<FrameworkElement>> _nodeVisualElements = [];
+    private readonly Dictionary<string, List<FrameworkElement>> _groupVisualElements = [];
     private readonly Dictionary<FrameworkElement, Point> _dragElementOrigins = [];
     private readonly Dictionary<string, List<FrameworkElement>> _endpointVisualElements = [];
     private CrossRoutePinInfo? _crossRouteDragStart;
@@ -49,6 +50,7 @@ public partial class MainWindow : Window
     private double _endpointDragStartOffset;
     private bool _endpointDragMoved;
     private int? _selectedPluginNodeSlot;
+    private string? _selectedPluginGroupId;
     private bool _updatingChannelToggle;
     private CallbackMode _vstCanvasMode = CallbackMode.Input;
     private VstInputCanvasRouteView _vstInputCanvasRouteView = VstInputCanvasRouteView.InputReturn;
@@ -59,15 +61,22 @@ public partial class MainWindow : Window
     private const string PinEndpointDestination = "endpoint-destination";
     private const string PinNodeInput = "node-input";
     private const string PinNodeOutput = "node-output";
+    private const string PinGroupInput = "group-input";
+    private const string PinGroupOutput = "group-output";
     private const string ConnectionEndpointToNode = "endpoint-to-node";
     private const string ConnectionNodeToEndpoint = "node-to-endpoint";
     private const string ConnectionNodeToNode = "node-to-node";
     private const string ConnectionEndpointToEndpoint = "endpoint-to-endpoint";
+    private const string ConnectionGroupInputToNode = "group-input-to-node";
+    private const string ConnectionNodeToGroupOutput = "node-to-group-output";
+    private const int GroupSidechainPinBase = 100;
     private const double VstCanvasMinWidth = 980.0;
     private const double VstCanvasMinHeight = 920.0;
     private const double VstCanvasWallMargin = 24.0;
     private const double VstEndpointCardWidth = 156.0;
     private const double VstNodeWidth = 138.0;
+    private const double VstGroupWidth = VstNodeWidth;
+    private const int CollapsedVisiblePinCount = 2;
     private static readonly RouteHueChoice[] RouteHueChoices =
     [
         new("Blue", "blue", "#4AA3FF", "#10243A"),
@@ -150,6 +159,7 @@ public partial class MainWindow : Window
         public CallbackMode Mode { get; init; } = CallbackMode.None;
         public int Channel { get; init; } = -1;
         public PluginNodeSnapshot? Node { get; init; }
+        public PluginGroupSnapshot? Group { get; init; }
         public int Pin { get; init; } = -1;
         public Point Point { get; init; }
         public string Label { get; init; } = string.Empty;
@@ -368,6 +378,38 @@ public partial class MainWindow : Window
         ClearWirePreview();
     }
 
+    private void RoutingCanvas_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_workspaceView != WorkspaceView.Vst || CanvasChildHasContextMenu(e.OriginalSource as DependencyObject))
+        {
+            return;
+        }
+
+        _lastCanvasClick = e.GetPosition(RoutingCanvas);
+        var menu = new ContextMenu
+        {
+            PlacementTarget = RoutingCanvas
+        };
+        menu.Items.Add(CreateNodeMenuItem("Create VST Group", CreatePluginGroupAtLastCanvasClick));
+        menu.IsOpen = true;
+        e.Handled = true;
+    }
+
+    private bool CanvasChildHasContextMenu(DependencyObject? source)
+    {
+        while (source is not null && source != RoutingCanvas)
+        {
+            if (source is FrameworkElement { ContextMenu: not null })
+            {
+                return true;
+            }
+
+            source = VisualTreeHelper.GetParent(source);
+        }
+
+        return false;
+    }
+
     private void RoutingCanvas_MouseMove(object sender, MouseEventArgs e)
     {
         if (_wireDragStart is null || e.LeftButton != MouseButtonState.Pressed)
@@ -401,11 +443,13 @@ public partial class MainWindow : Window
             _settings = FxHostSettingsStore.Load();
             _settings.Endpoints ??= [];
             _settings.PluginNodes ??= [];
+            _settings.PluginGroups ??= [];
             _settings.CanvasConnections ??= [];
             _settings.PluginScanFolders ??= [];
             _settings.EndpointCanvasYOffsets ??= [];
             _settings.EndpointRouteHues ??= [];
             NormalizePluginScanFolders();
+            NormalizePluginGroups();
             _kind = _settings.Kind == VoicemeeterKind.Unknown ? VoicemeeterKind.Potato : _settings.Kind;
             _selectedMode = _settings.SelectedMode == CallbackMode.None ? CallbackMode.Input : _settings.SelectedMode;
             PluginSearchTextBox.Text = _settings.PluginSearchText;
@@ -471,6 +515,44 @@ public partial class MainWindow : Window
 
         _saveTimer.Stop();
         _saveTimer.Start();
+    }
+
+    private void NormalizePluginGroups()
+    {
+        var validSlots = _settings.PluginNodes
+            .Select(static node => node.Slot)
+            .ToHashSet();
+        var usedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in _settings.PluginGroups)
+        {
+            if (string.IsNullOrWhiteSpace(group.Id) || !usedIds.Add(group.Id))
+            {
+                group.Id = Guid.NewGuid().ToString("N");
+                usedIds.Add(group.Id);
+            }
+
+            group.Name = string.IsNullOrWhiteSpace(group.Name) ? "VST Group" : group.Name.Trim();
+            group.InputPins = Math.Clamp(group.InputPins, 1, 8);
+            group.OutputPins = Math.Clamp(group.OutputPins, 1, 8);
+            group.SidechainInputPins = Math.Clamp(group.SidechainInputPins, 1, 8);
+            group.SidechainOutputPins = Math.Clamp(group.SidechainOutputPins, 1, 8);
+            group.MemberSlots = group.MemberSlots
+                .Where(validSlots.Contains)
+                .Distinct()
+                .ToList();
+
+            if (group.Mode == CallbackMode.None && group.MemberSlots.Count > 0)
+            {
+                group.Mode = _settings.PluginNodes.First(node => node.Slot == group.MemberSlots[0]).Mode;
+            }
+        }
+
+        _settings.CanvasConnections.RemoveAll(connection =>
+            (connection.Kind == ConnectionGroupInputToNode &&
+             !_settings.PluginGroups.Any(group => group.Id == connection.FromGroupId)) ||
+            (connection.Kind == ConnectionNodeToGroupOutput &&
+             !_settings.PluginGroups.Any(group => group.Id == connection.ToGroupId)));
     }
 
     private void MigratePlainInputOutputCanvasRoutesToSharedChannelRoutes()
@@ -1606,17 +1688,17 @@ public partial class MainWindow : Window
         if (CanChangeEndpointPinMode(endpoint))
         {
             var currentMode = EndpointPinModeFor(mode, endpoint);
-            var stereo = CreateNodeMenuItem("Stereo", () => SetEndpointPinMode(mode, endpoint, EndpointPinMode.Stereo));
-            stereo.IsCheckable = true;
-            stereo.IsChecked = currentMode == EndpointPinMode.Stereo;
-            stereo.IsEnabled = !patchBypassed;
-            menu.Items.Add(stereo);
+            var minimize = CreateNodeMenuItem("Minimize Pins", () => SetEndpointPinMode(mode, endpoint, EndpointPinMode.Stereo));
+            minimize.IsCheckable = true;
+            minimize.IsChecked = currentMode == EndpointPinMode.Stereo;
+            minimize.IsEnabled = !patchBypassed;
+            menu.Items.Add(minimize);
 
-            var full = CreateNodeMenuItem($"Advanced / Full ({endpoint.ChannelCount})", () => SetEndpointPinMode(mode, endpoint, EndpointPinMode.Full));
-            full.IsCheckable = true;
-            full.IsChecked = currentMode == EndpointPinMode.Full;
-            full.IsEnabled = !patchBypassed;
-            menu.Items.Add(full);
+            var expand = CreateNodeMenuItem($"Expand Pins ({endpoint.ChannelCount})", () => SetEndpointPinMode(mode, endpoint, EndpointPinMode.Full));
+            expand.IsCheckable = true;
+            expand.IsChecked = currentMode == EndpointPinMode.Full;
+            expand.IsEnabled = !patchBypassed;
+            menu.Items.Add(expand);
             menu.Items.Add(new Separator());
         }
 
@@ -1702,6 +1784,8 @@ public partial class MainWindow : Window
             ConnectionEndpointToNode => $"CH {connection.FromChannel + 1} -> node input {connection.ToPin + 1}",
             ConnectionNodeToEndpoint => $"node output {connection.FromPin + 1} -> CH {connection.ToChannel + 1}",
             ConnectionNodeToNode => $"node output {connection.FromPin + 1} -> node input {connection.ToPin + 1}",
+            ConnectionGroupInputToNode => $"group input {connection.FromPin + 1} -> node input {connection.ToPin + 1}",
+            ConnectionNodeToGroupOutput => $"node output {connection.FromPin + 1} -> group output {connection.ToPin + 1}",
             _ => "Cable"
         };
     }
@@ -1716,17 +1800,13 @@ public partial class MainWindow : Window
     private string EndpointPinModeLabel(CallbackMode mode, IoEndpoint endpoint)
     {
         return CanChangeEndpointPinMode(endpoint) && EndpointPinModeFor(mode, endpoint) == EndpointPinMode.Full
-            ? $"Full {endpoint.ChannelCount}"
-            : "Stereo";
+            ? $"Expanded {endpoint.ChannelCount}"
+            : "Minimized";
     }
 
     private string EndpointPinModeLabel(CallbackMode mode, IoEndpoint endpoint, int visiblePinCount)
     {
-        var label = EndpointPinModeLabel(mode, endpoint);
-        var stereoPinCount = Math.Min(2, endpoint.ChannelCount);
-        return label == "Stereo" && visiblePinCount > stereoPinCount
-            ? $"Stereo + routed {visiblePinCount}"
-            : label;
+        return EndpointPinModeLabel(mode, endpoint);
     }
 
     private void SetEndpointPinMode(CallbackMode mode, IoEndpoint endpoint, EndpointPinMode pinMode)
@@ -3379,6 +3459,19 @@ public partial class MainWindow : Window
     private void SelectPluginNode(int slot, bool rebuildCanvas)
     {
         _selectedPluginNodeSlot = slot;
+        _selectedPluginGroupId = null;
+        RebuildVstNodeList();
+
+        if (rebuildCanvas && _workspaceView == WorkspaceView.Vst)
+        {
+            RebuildRoutingCanvas();
+        }
+    }
+
+    private void SelectPluginGroup(string id, bool rebuildCanvas)
+    {
+        _selectedPluginGroupId = id;
+        _selectedPluginNodeSlot = null;
         RebuildVstNodeList();
 
         if (rebuildCanvas && _workspaceView == WorkspaceView.Vst)
@@ -3465,11 +3558,24 @@ public partial class MainWindow : Window
         QueueSave();
     }
 
+    private void SetNodePinsCollapsed(PluginNodeSnapshot node, bool collapsed)
+    {
+        node.PinsCollapsed = collapsed;
+        AppendLog($"{node.Name}: pins {(collapsed ? "minimized" : "expanded")}.");
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
     private void RemovePluginNode(PluginNodeSnapshot node)
     {
         _engine.RemovePluginNode(node.Slot);
         _settings.PluginNodes.Remove(node);
         _settings.CanvasConnections.RemoveAll(connection => connection.FromSlot == node.Slot || connection.ToSlot == node.Slot);
+        foreach (var group in _settings.PluginGroups.ToArray())
+        {
+            group.MemberSlots.Remove(node.Slot);
+        }
+
         if (_selectedPluginNodeSlot == node.Slot)
         {
             _selectedPluginNodeSlot = null;
@@ -3494,11 +3600,13 @@ public partial class MainWindow : Window
         _pinPositions.Clear();
         _wirePreview = null;
         _nodeVisualElements.Clear();
+        _groupVisualElements.Clear();
         _endpointVisualElements.Clear();
         _dragElementOrigins.Clear();
         RoutingCanvas.Children.Clear();
         UpdateVstCanvasSize();
         DrawCanvasCards();
+        DrawPluginGroups();
         DrawPluginNodes();
         DrawDefaultPassthroughConnections();
         DrawMirroredChannelRoutes();
@@ -3560,11 +3668,17 @@ public partial class MainWindow : Window
             VstEndpointStackBottom(rightMode, outputSide: true));
         var nodeBottom = _settings.PluginNodes
             .Where(NodeBelongsToCurrentCanvas)
+            .Where(node => GroupForNode(node.Slot) is null)
             .Select(static node => node.Y + VstNodeHeight(node) + 96.0)
             .DefaultIfEmpty(0.0)
             .Max();
+        var groupBottom = _settings.PluginGroups
+            .Where(GroupBelongsToCurrentCanvas)
+            .Select(group => group.Y + VstGroupHeight(group) + 96.0)
+            .DefaultIfEmpty(0.0)
+            .Max();
 
-        return Math.Max(VstCanvasMinHeight, Math.Max(endpointBottom, nodeBottom) + 160.0);
+        return Math.Max(VstCanvasMinHeight, Math.Max(endpointBottom, Math.Max(nodeBottom, groupBottom)) + 160.0);
     }
 
     private double VstEndpointStackBottom(CallbackMode mode, bool outputSide)
@@ -3635,10 +3749,9 @@ public partial class MainWindow : Window
         var configuredPinCount = _settingsByEndpoint.TryGetValue(key, out var settings)
             ? settings.CanvasPinCount
             : Math.Min(2, endpoint.ChannelCount);
-        var requiredPinCount = RequiredCanvasPinCountForRoutes(mode, endpoint, outputSide);
 
         return Math.Clamp(
-            Math.Max(configuredPinCount, requiredPinCount),
+            configuredPinCount,
             Math.Min(2, endpoint.ChannelCount),
             endpoint.ChannelCount);
     }
@@ -3830,6 +3943,128 @@ public partial class MainWindow : Window
             RoutingCanvas.Children.Add(label);
             endpointElements.Add(label);
         }
+
+        RegisterHiddenEndpointPinAnchors(endpoint, mode, x, y, outputSide, pinCount);
+        DrawHiddenEndpointPinSummary(endpoint, mode, x, y, outputSide, pinCount, height, endpointElements);
+    }
+
+    private void RegisterHiddenEndpointPinAnchors(IoEndpoint endpoint, CallbackMode mode, double x, double y, bool outputSide, int visiblePinCount)
+    {
+        if (visiblePinCount >= endpoint.ChannelCount || visiblePinCount <= 0)
+        {
+            return;
+        }
+
+        foreach (var offset in HiddenConnectedEndpointOffsets(mode, endpoint, outputSide, visiblePinCount))
+        {
+            var channel = endpoint.Range.Start + offset;
+            var anchorOffset = Math.Min(offset % CollapsedVisiblePinCount, visiblePinCount - 1);
+            var point = new Point(
+                outputSide ? x + 12 : x + 144,
+                y + 38 + (anchorOffset * 13));
+            var pinInfo = new CanvasPinInfo
+            {
+                Kind = outputSide ? PinEndpointDestination : PinEndpointSource,
+                Mode = mode,
+                Channel = channel,
+                Pin = offset,
+                Point = point,
+                Label = $"{endpoint.Name} {EndpointPinLabel(endpoint.ChannelCount, offset)}"
+            };
+            _pinPositions[PinPositionKey(pinInfo)] = pinInfo.Point;
+        }
+    }
+
+    private void DrawHiddenEndpointPinSummary(
+        IoEndpoint endpoint,
+        CallbackMode mode,
+        double x,
+        double y,
+        bool outputSide,
+        int visiblePinCount,
+        double height,
+        List<FrameworkElement> endpointElements)
+    {
+        var hidden = HiddenConnectedEndpointOffsets(mode, endpoint, outputSide, visiblePinCount);
+        if (hidden.Count == 0)
+        {
+            return;
+        }
+
+        var text = string.Join(", ", hidden.Select(offset => (offset + 1).ToString(CultureInfo.InvariantCulture)));
+        var summary = new TextBlock
+        {
+            Text = text,
+            FontSize = 10,
+            FontWeight = FontWeights.Bold,
+            Foreground = (Brush)FindResource("DangerBrush"),
+            IsHitTestVisible = false,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = VstEndpointCardWidth - 22
+        };
+
+        Canvas.SetLeft(summary, outputSide ? x + 28 : x + 10);
+        Canvas.SetTop(summary, y + height - 20);
+        RoutingCanvas.Children.Add(summary);
+        endpointElements.Add(summary);
+    }
+
+    private List<int> HiddenConnectedEndpointOffsets(CallbackMode mode, IoEndpoint endpoint, bool outputSide, int visiblePinCount)
+    {
+        var hidden = new SortedSet<int>();
+        void IncludeChannel(int channel)
+        {
+            if (channel < endpoint.Range.Start || channel > endpoint.Range.End)
+            {
+                return;
+            }
+
+            var offset = channel - endpoint.Range.Start;
+            if (offset >= visiblePinCount)
+            {
+                hidden.Add(offset);
+            }
+        }
+
+        foreach (var connection in _settings.CanvasConnections)
+        {
+            if (!CanvasConnectionBelongsToCurrentView(connection))
+            {
+                continue;
+            }
+
+            if (!outputSide &&
+                connection.FromKind == PinEndpointSource &&
+                connection.FromMode == mode)
+            {
+                IncludeChannel(connection.FromChannel);
+            }
+
+            if (outputSide &&
+                connection.ToKind == PinEndpointDestination &&
+                connection.ToMode == mode)
+            {
+                IncludeChannel(connection.ToChannel);
+            }
+        }
+
+        if (IsInputDirectOutputVstView())
+        {
+            foreach (var route in AllDirectRoutes())
+            {
+                if (!outputSide && mode == CallbackMode.Input)
+                {
+                    IncludeChannel(route.SourceChannel);
+                }
+
+                if (outputSide && mode == CallbackMode.Output)
+                {
+                    IncludeChannel(route.DestinationChannel);
+                }
+            }
+        }
+
+        return hidden.ToList();
     }
 
     private sealed record EndpointDragInfo(CallbackMode Mode, IoEndpoint Endpoint);
@@ -3841,13 +4076,596 @@ public partial class MainWindow : Window
             : 0.0;
     }
 
+    private void DrawPluginGroups()
+    {
+        foreach (var group in _settings.PluginGroups.Where(GroupBelongsToCurrentCanvas))
+        {
+            DrawPluginGroup(group);
+        }
+    }
+
+    private void DrawPluginGroup(PluginGroupSnapshot group)
+    {
+        var members = GroupMembers(group).ToList();
+        var selected = _selectedPluginGroupId == group.Id;
+        var inputPins = VisibleGroupInputPinIds(group).ToList();
+        var outputPins = VisibleGroupOutputPinIds(group).ToList();
+        var pinRows = Math.Max(inputPins.Count, outputPins.Count);
+        var height = VstGroupHeight(pinRows);
+        var border = new Border
+        {
+            Width = VstGroupWidth,
+            Height = height,
+            Background = (Brush)FindResource("PanelBrush"),
+            BorderBrush = selected
+                ? (Brush)FindResource("VolumeAccentBrush")
+                : (Brush)FindResource("RouteAccentBrush"),
+            BorderThickness = selected ? new Thickness(2) : new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(10, 8, 10, 8),
+            Tag = group,
+            ContextMenu = BuildGroupContextMenu(group)
+        };
+        border.MouseLeftButtonDown += Group_MouseLeftButtonDown;
+        border.MouseMove += Group_MouseMove;
+        border.MouseLeftButtonUp += Group_MouseLeftButtonUp;
+        Canvas.SetLeft(border, group.X);
+        Canvas.SetTop(border, group.Y);
+        RoutingCanvas.Children.Add(border);
+
+        var elements = new List<FrameworkElement> { border };
+        _groupVisualElements[group.Id] = elements;
+
+        var stack = new StackPanel();
+        border.Child = stack;
+        stack.Children.Add(new TextBlock
+        {
+            Text = group.Name,
+            FontWeight = FontWeights.SemiBold,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        });
+        stack.Children.Add(new TextBlock
+        {
+            Text = members.Count == 1 ? "1 VST" : $"{members.Count} VSTs",
+            Style = (Style)FindResource("MutedText"),
+            Margin = new Thickness(0, 4, 0, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis
+        });
+
+        for (var row = 0; row < inputPins.Count; row++)
+        {
+            DrawGroupPin(group, inputPins[row], row, input: true);
+        }
+
+        for (var row = 0; row < outputPins.Count; row++)
+        {
+            DrawGroupPin(group, outputPins[row], row, input: false);
+        }
+
+        RegisterHiddenGroupPinAnchors(group, inputPins, outputPins);
+        DrawHiddenGroupPinSummary(group, inputPins, outputPins, height);
+    }
+
+    private void DrawGroupPin(PluginGroupSnapshot group, int groupPin, int row, bool input)
+    {
+        var x = input ? group.X : group.X + VstGroupWidth;
+        var y = group.Y + 48 + (row * 18);
+        var pinLabel = GroupPinLabel(groupPin, input);
+        var pinInfo = ResolveGroupCanvasPin(group, groupPin, input, new Point(x, y), pinLabel);
+        _pinPositions[PinPositionKey(pinInfo)] = pinInfo.Point;
+
+        var groupMenu = BuildGroupContextMenu(group);
+        var pin = new Ellipse
+        {
+            Width = 12,
+            Height = 12,
+            Fill = (Brush)FindResource("PanelBrush"),
+            Stroke = input
+                ? (Brush)FindResource("DelayAccentBrush")
+                : pinInfo.Node is not null
+                    ? HueStrokeBrush(SourceHueKeyForNode(pinInfo.Node.Slot, [])) ?? (Brush)FindResource("RouteAccentBrush")
+                    : (Brush)FindResource("RouteAccentBrush"),
+            StrokeThickness = 2,
+            Cursor = Cursors.Hand,
+            Tag = pinInfo,
+            ContextMenu = BuildCanvasPinContextMenu(pinInfo, groupMenu),
+            ToolTip = pinInfo.Node is null
+                ? "Open the group and map this group port to an internal VST pin."
+                : pinInfo.Label
+        };
+        AttachPinHandlers(pin);
+        Canvas.SetLeft(pin, x - 6);
+        Canvas.SetTop(pin, y - 6);
+        RoutingCanvas.Children.Add(pin);
+        _groupVisualElements[group.Id].Add(pin);
+
+        var label = new TextBlock
+        {
+            Text = pinLabel,
+            FontSize = 10,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = (Brush)FindResource("MutedTextBrush"),
+            IsHitTestVisible = false
+        };
+        Canvas.SetLeft(label, input ? x + 10 : x - 28);
+        Canvas.SetTop(label, y - 8);
+        RoutingCanvas.Children.Add(label);
+        _groupVisualElements[group.Id].Add(label);
+    }
+
+    private void RegisterHiddenGroupPinAnchors(PluginGroupSnapshot group, IReadOnlyList<int> visibleInputPins, IReadOnlyList<int> visibleOutputPins)
+    {
+        RegisterHiddenGroupSidePinAnchors(group, visibleInputPins, input: true);
+        RegisterHiddenGroupSidePinAnchors(group, visibleOutputPins, input: false);
+    }
+
+    private void RegisterHiddenGroupSidePinAnchors(PluginGroupSnapshot group, IReadOnlyList<int> visiblePins, bool input)
+    {
+        var allPins = input ? GroupInputPinIds(group).ToList() : GroupOutputPinIds(group).ToList();
+        if (visiblePins.Count == 0 || visiblePins.Count >= allPins.Count)
+        {
+            return;
+        }
+
+        foreach (var pin in allPins.Where(pin => !visiblePins.Contains(pin)))
+        {
+            var anchorPin = AnchorPinForHiddenPin(visiblePins, pin);
+            var row = PinIndexOf(visiblePins, anchorPin);
+            if (row < 0)
+            {
+                continue;
+            }
+
+            var point = new Point(
+                input ? group.X : group.X + VstGroupWidth,
+                group.Y + 48 + (row * 18));
+            var pinInfo = ResolveGroupCanvasPin(group, pin, input, point, GroupPinLabel(pin, input));
+            _pinPositions[PinPositionKey(pinInfo)] = pinInfo.Point;
+        }
+    }
+
+    private void DrawHiddenGroupPinSummary(PluginGroupSnapshot group, IReadOnlyList<int> visibleInputPins, IReadOnlyList<int> visibleOutputPins, double height)
+    {
+        var hiddenInputPins = HiddenMappedGroupPins(group, visibleInputPins, input: true);
+        var hiddenOutputPins = HiddenMappedGroupPins(group, visibleOutputPins, input: false);
+        if (hiddenInputPins.Count == 0 && hiddenOutputPins.Count == 0)
+        {
+            return;
+        }
+
+        var text = string.Join("  ", new[]
+        {
+            hiddenInputPins.Count > 0 ? $"I: {FormatGroupPins(hiddenInputPins)}" : string.Empty,
+            hiddenOutputPins.Count > 0 ? $"O: {FormatGroupPins(hiddenOutputPins)}" : string.Empty
+        }.Where(static part => part.Length > 0));
+        var summary = new TextBlock
+        {
+            Text = text,
+            FontSize = 9,
+            FontWeight = FontWeights.Bold,
+            Foreground = (Brush)FindResource("DangerBrush"),
+            MaxWidth = VstGroupWidth - 16,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            IsHitTestVisible = false
+        };
+
+        Canvas.SetLeft(summary, group.X + 8);
+        Canvas.SetTop(summary, group.Y + height - 18);
+        RoutingCanvas.Children.Add(summary);
+        _groupVisualElements[group.Id].Add(summary);
+    }
+
+    private List<int> HiddenMappedGroupPins(PluginGroupSnapshot group, IReadOnlyList<int> visiblePins, bool input)
+    {
+        var pins = input ? GroupInputPinIds(group) : GroupOutputPinIds(group);
+        return pins
+            .Where(pin => !visiblePins.Contains(pin))
+            .Where(pin => input ? FindGroupInputMapping(group, pin) is not null : FindGroupOutputMapping(group, pin) is not null)
+            .ToList();
+    }
+
+    private static string FormatGroupPins(IEnumerable<int> pins)
+    {
+        return string.Join(", ", pins.Select(pin =>
+            pin >= GroupSidechainPinBase ? $"S{pin - GroupSidechainPinBase + 1}" : (pin + 1).ToString(CultureInfo.InvariantCulture)));
+    }
+
+    private static int AnchorPinForHiddenPin(IReadOnlyList<int> visiblePins, int hiddenPin)
+    {
+        if (visiblePins.Count == 0)
+        {
+            return hiddenPin;
+        }
+
+        return visiblePins[Math.Abs(hiddenPin) % visiblePins.Count];
+    }
+
+    private static int PinIndexOf(IReadOnlyList<int> pins, int pin)
+    {
+        for (var index = 0; index < pins.Count; index++)
+        {
+            if (pins[index] == pin)
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private ContextMenu BuildGroupContextMenu(PluginGroupSnapshot group)
+    {
+        var menu = new ContextMenu();
+        menu.Items.Add(CreateNodeMenuItem("Open Group", () => ShowGroupProperties(group)));
+        menu.Items.Add(CreateNodeMenuItem("Properties", () => ShowGroupProperties(group)));
+        menu.Items.Add(CreateNodeMenuItem("Copy Group", () => CopyPluginGroup(group)));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(CreateNodeMenuItem(group.PinsCollapsed ? "Expand Pins" : "Minimize Pins", () => SetGroupPinsCollapsed(group, !group.PinsCollapsed)));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(CreateNodeMenuItem("Auto-Wire Chain", () => AutoWirePluginGroup(group)));
+        menu.Items.Add(new Separator());
+
+        var remove = CreateNodeMenuItem("Remove Group", () => RemovePluginGroup(group));
+        remove.Foreground = (Brush)FindResource("DangerBrush");
+        menu.Items.Add(remove);
+        return menu;
+    }
+
+    private void SetGroupPinsCollapsed(PluginGroupSnapshot group, bool collapsed)
+    {
+        group.PinsCollapsed = collapsed;
+        AppendLog($"{group.Name}: pins {(collapsed ? "minimized" : "expanded")}.");
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private void CreatePluginGroupAtLastCanvasClick()
+    {
+        var groupName = PromptForPluginGroupName(UniquePluginGroupName("VST Group"));
+        if (string.IsNullOrWhiteSpace(groupName))
+        {
+            return;
+        }
+
+        var group = new PluginGroupSnapshot
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Name = UniquePluginGroupName(groupName.Trim()),
+            Mode = CurrentVstCanvasNodeMode(),
+            X = Math.Max(300, (int)_lastCanvasClick.X),
+            Y = Math.Max(80, (int)_lastCanvasClick.Y),
+            InputPins = 2,
+            OutputPins = 2
+        };
+
+        _settings.PluginGroups.Add(group);
+        _selectedPluginGroupId = group.Id;
+        _selectedPluginNodeSlot = null;
+        AppendLog($"Created VST group: {group.Name}.");
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private string? PromptForPluginGroupName(string suggestedName)
+    {
+        var windowBrush = ThemeBrushOr("WindowBrush", "#071114");
+        var textBrush = ThemeBrushOr("TextBrush", "#E7EEF0");
+        var mutedTextBrush = ThemeBrushOr("MutedTextBrush", "#8AA0A6");
+        var fieldBrush = ThemeBrushOr("FieldBrush", "#0E1B1F");
+        var routeAccentBrush = ThemeBrushOr("RouteAccentBrush", "#55C27A");
+        var dialog = new Window
+        {
+            Title = "New VST Group",
+            Owner = this,
+            Width = 360,
+            Height = 200,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = windowBrush,
+            Foreground = textBrush
+        };
+
+        var root = new Grid { Margin = new Thickness(14) };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var label = new TextBlock
+        {
+            Text = "Group name",
+            Foreground = mutedTextBrush,
+            Margin = new Thickness(0, 0, 0, 6)
+        };
+        root.Children.Add(label);
+
+        var textBox = new TextBox
+        {
+            Text = suggestedName,
+            MinHeight = 30,
+            Padding = new Thickness(8, 4, 8, 4),
+            Background = fieldBrush,
+            Foreground = textBrush,
+            BorderBrush = routeAccentBrush
+        };
+        Grid.SetRow(textBox, 1);
+        root.Children.Add(textBox);
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 14, 0, 0)
+        };
+        var cancel = new Button
+        {
+            Content = "Cancel",
+            MinWidth = 84,
+            Margin = new Thickness(0, 0, 8, 0)
+        };
+        cancel.Click += (_, _) => dialog.DialogResult = false;
+        var ok = new Button
+        {
+            Content = "Create",
+            MinWidth = 84,
+            IsDefault = true
+        };
+        ok.Click += (_, _) => dialog.DialogResult = true;
+        buttons.Children.Add(cancel);
+        buttons.Children.Add(ok);
+        Grid.SetRow(buttons, 2);
+        root.Children.Add(buttons);
+
+        dialog.Content = root;
+        dialog.Loaded += (_, _) =>
+        {
+            textBox.Focus();
+            textBox.SelectAll();
+        };
+
+        return dialog.ShowDialog() == true ? textBox.Text.Trim() : null;
+    }
+
+    private Brush ThemeBrushOr(string resourceKey, string fallbackHex)
+    {
+        return TryFindResource(resourceKey) as Brush ?? SolidBrushFrom(fallbackHex);
+    }
+
+    private static SolidColorBrush SolidBrushFrom(string hex)
+    {
+        return new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
+    }
+
+    private string UniquePluginGroupName(string baseName)
+    {
+        var names = _settings.PluginGroups
+            .Select(static group => group.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!names.Contains(baseName))
+        {
+            return baseName;
+        }
+
+        for (var index = 2; index < 1000; index++)
+        {
+            var candidate = $"{baseName} {index}";
+            if (!names.Contains(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return $"{baseName} {Guid.NewGuid():N}";
+    }
+
+    private PluginGroupSnapshot? GroupForNode(int slot)
+    {
+        return _settings.PluginGroups.FirstOrDefault(group => group.MemberSlots.Contains(slot));
+    }
+
+    private IEnumerable<PluginNodeSnapshot> GroupMembers(PluginGroupSnapshot group)
+    {
+        foreach (var slot in group.MemberSlots)
+        {
+            var node = _settings.PluginNodes.FirstOrDefault(candidate => candidate.Slot == slot);
+            if (node is not null)
+            {
+                yield return node;
+            }
+        }
+    }
+
+    private bool GroupBelongsToCurrentCanvas(PluginGroupSnapshot group)
+    {
+        return group.Mode == CurrentVstCanvasNodeMode();
+    }
+
+    private CanvasPinInfo ResolveGroupCanvasPin(PluginGroupSnapshot group, int groupPin, bool input, Point point, string pinLabel)
+    {
+        if (input &&
+            FindGroupInputMapping(group, groupPin) is { } inputMapping &&
+            _settings.PluginNodes.FirstOrDefault(node => node.Slot == inputMapping.ToSlot) is { } inputNode)
+        {
+            return new CanvasPinInfo
+            {
+                Kind = PinNodeInput,
+                Mode = inputNode.Mode,
+                Node = inputNode,
+                Group = group,
+                Pin = inputMapping.ToPin,
+                Point = point,
+                Label = $"{group.Name} in {pinLabel} -> {inputNode.Name} {NodeInputPinLabel(inputNode, inputMapping.ToPin)}"
+            };
+        }
+
+        if (!input &&
+            FindGroupOutputMapping(group, groupPin) is { } outputMapping &&
+            _settings.PluginNodes.FirstOrDefault(node => node.Slot == outputMapping.FromSlot) is { } outputNode)
+        {
+            return new CanvasPinInfo
+            {
+                Kind = PinNodeOutput,
+                Mode = outputNode.Mode,
+                Node = outputNode,
+                Group = group,
+                Pin = outputMapping.FromPin,
+                Point = point,
+                Label = $"{group.Name} out {pinLabel} <- {outputNode.Name} {NodeOutputPinLabel(outputNode, outputMapping.FromPin)}"
+            };
+        }
+
+        return new CanvasPinInfo
+        {
+            Kind = input ? PinGroupInput : PinGroupOutput,
+            Mode = group.Mode,
+            Group = group,
+            Pin = groupPin,
+            Point = point,
+            Label = $"{group.Name} {(input ? "in" : "out")} {pinLabel}"
+        };
+    }
+
+    private CanvasConnectionSnapshot? FindGroupInputMapping(PluginGroupSnapshot group, int groupPin)
+    {
+        return _settings.CanvasConnections.FirstOrDefault(connection =>
+            connection.Kind == ConnectionGroupInputToNode &&
+            connection.FromGroupId == group.Id &&
+            connection.FromPin == groupPin);
+    }
+
+    private CanvasConnectionSnapshot? FindGroupOutputMapping(PluginGroupSnapshot group, int groupPin)
+    {
+        return _settings.CanvasConnections.FirstOrDefault(connection =>
+            connection.Kind == ConnectionNodeToGroupOutput &&
+            connection.ToGroupId == group.Id &&
+            connection.ToPin == groupPin);
+    }
+
+    private static int GroupInputPinCount(PluginGroupSnapshot group)
+    {
+        return VisibleGroupInputPinIds(group).Count();
+    }
+
+    private static int GroupOutputPinCount(PluginGroupSnapshot group)
+    {
+        return VisibleGroupOutputPinIds(group).Count();
+    }
+
+    private double VstGroupHeight(PluginGroupSnapshot group)
+    {
+        return VstGroupHeight(Math.Max(
+            GroupInputPinCount(group),
+            GroupOutputPinCount(group)));
+    }
+
+    private static double VstGroupHeight(int pinRows)
+    {
+        return Math.Max(92.0, 68.0 + (Math.Max(1, pinRows) * 18.0));
+    }
+
+    private static IEnumerable<int> GroupInputPinIds(PluginGroupSnapshot group)
+    {
+        for (var pin = 0; pin < Math.Clamp(group.InputPins, 1, 8); pin++)
+        {
+            yield return pin;
+        }
+
+        if (!group.SidechainPortsEnabled)
+        {
+            yield break;
+        }
+
+        for (var pin = 0; pin < Math.Clamp(group.SidechainInputPins, 1, 8); pin++)
+        {
+            yield return GroupSidechainPinBase + pin;
+        }
+    }
+
+    private static IEnumerable<int> GroupOutputPinIds(PluginGroupSnapshot group)
+    {
+        for (var pin = 0; pin < Math.Clamp(group.OutputPins, 1, 8); pin++)
+        {
+            yield return pin;
+        }
+
+        if (!group.SidechainPortsEnabled)
+        {
+            yield break;
+        }
+
+        for (var pin = 0; pin < Math.Clamp(group.SidechainOutputPins, 1, 8); pin++)
+        {
+            yield return GroupSidechainPinBase + pin;
+        }
+    }
+
+    private static IEnumerable<int> VisibleGroupInputPinIds(PluginGroupSnapshot group)
+    {
+        var allPins = GroupInputPinIds(group).ToList();
+        if (!group.PinsCollapsed)
+        {
+            return allPins;
+        }
+
+        var visible = new List<int>();
+        visible.AddRange(Enumerable.Range(0, Math.Min(CollapsedVisiblePinCount, Math.Clamp(group.InputPins, 1, 8))));
+        if (group.SidechainPortsEnabled)
+        {
+            visible.AddRange(Enumerable.Range(0, Math.Min(CollapsedVisiblePinCount, Math.Clamp(group.SidechainInputPins, 1, 8)))
+                .Select(pin => GroupSidechainPinBase + pin));
+        }
+
+        return visible.Where(allPins.Contains).Distinct().ToList();
+    }
+
+    private static IEnumerable<int> VisibleGroupOutputPinIds(PluginGroupSnapshot group)
+    {
+        var allPins = GroupOutputPinIds(group).ToList();
+        if (!group.PinsCollapsed)
+        {
+            return allPins;
+        }
+
+        var visible = new List<int>();
+        visible.AddRange(Enumerable.Range(0, Math.Min(CollapsedVisiblePinCount, Math.Clamp(group.OutputPins, 1, 8))));
+        if (group.SidechainPortsEnabled)
+        {
+            visible.AddRange(Enumerable.Range(0, Math.Min(CollapsedVisiblePinCount, Math.Clamp(group.SidechainOutputPins, 1, 8)))
+                .Select(pin => GroupSidechainPinBase + pin));
+        }
+
+        return visible.Where(allPins.Contains).Distinct().ToList();
+    }
+
+    private static string GroupPinLabel(int pin, bool input)
+    {
+        if (pin >= GroupSidechainPinBase)
+        {
+            var sidechainPin = pin - GroupSidechainPinBase;
+            return sidechainPin switch
+            {
+                0 => input ? "SL" : "SO-L",
+                1 => input ? "SR" : "SO-R",
+                _ => input ? $"S{sidechainPin + 1}" : $"SO{sidechainPin + 1}"
+            };
+        }
+
+        return pin switch
+        {
+            0 => "L",
+            1 => "R",
+            _ => $"{pin + 1}"
+        };
+    }
+
     private void DrawPluginNodes()
     {
-        foreach (var node in _settings.PluginNodes.Where(NodeBelongsToCurrentCanvas))
+        foreach (var node in _settings.PluginNodes.Where(NodeBelongsToCurrentCanvas).Where(node => GroupForNode(node.Slot) is null))
         {
             _nodeVisualElements[node.Slot] = [];
             var selected = _selectedPluginNodeSlot == node.Slot;
             var nodeHeight = VstNodeHeight(node);
+            var inputPins = VisibleNodeInputPinIds(node).ToList();
+            var outputPins = VisibleNodeOutputPinIds(node).ToList();
             var border = new Border
             {
                 Width = VstNodeWidth,
@@ -3886,15 +4704,18 @@ public partial class MainWindow : Window
                 TextTrimming = TextTrimming.CharacterEllipsis
             });
 
-            for (var pin = 0; pin < NodeInputVisualPinCount(node); pin++)
+            for (var row = 0; row < inputPins.Count; row++)
             {
-                DrawNodePin(node, pin, node.X, node.Y + 48 + (pin * 18), input: true);
+                DrawNodePin(node, inputPins[row], node.X, node.Y + 48 + (row * 18), input: true);
             }
 
-            for (var pin = 0; pin < node.OutputPins; pin++)
+            for (var row = 0; row < outputPins.Count; row++)
             {
-                DrawNodePin(node, pin, node.X + VstNodeWidth, node.Y + 48 + (pin * 18), input: false);
+                DrawNodePin(node, outputPins[row], node.X + VstNodeWidth, node.Y + 48 + (row * 18), input: false);
             }
+
+            RegisterHiddenNodePinAnchors(node, inputPins, outputPins);
+            DrawHiddenNodePinSummary(node, inputPins, outputPins, nodeHeight);
         }
     }
 
@@ -3906,6 +4727,13 @@ public partial class MainWindow : Window
         menu.Items.Add(new Separator());
         menu.Items.Add(CreateNodeMenuItem("Properties", () => ShowNodeProperties(node)));
         menu.Items.Add(CreateNodeMenuItem("Add Stereo Sidechain Input", () => AddStereoSidechainInput(node)));
+        menu.Items.Add(CreateNodeMenuItem(node.PinsCollapsed ? "Expand Pins" : "Minimize Pins", () => SetNodePinsCollapsed(node, !node.PinsCollapsed)));
+        menu.Items.Add(BuildAddToGroupMenuItem(node));
+        if (GroupForNode(node.Slot) is { } group)
+        {
+            menu.Items.Add(CreateNodeMenuItem($"Remove From {group.Name}", () => RemoveNodeFromGroup(node)));
+        }
+
         menu.Items.Add(new Separator());
 
         var remove = CreateNodeMenuItem("Remove", () => RemovePluginNode(node));
@@ -3919,6 +4747,85 @@ public partial class MainWindow : Window
         var item = new MenuItem { Header = header };
         item.Click += (_, _) => action();
         return item;
+    }
+
+    private MenuItem BuildAddToGroupMenuItem(PluginNodeSnapshot node)
+    {
+        var item = new MenuItem { Header = "Add To Group" };
+        var groups = _settings.PluginGroups
+            .Where(group => group.Mode == node.Mode && !group.MemberSlots.Contains(node.Slot))
+            .OrderBy(static group => group.Name)
+            .ToList();
+
+        foreach (var group in groups)
+        {
+            item.Items.Add(CreateNodeMenuItem(group.Name, () => AddNodeToGroup(node, group)));
+        }
+
+        if (groups.Count > 0)
+        {
+            item.Items.Add(new Separator());
+        }
+
+        item.Items.Add(CreateNodeMenuItem("New Group From This VST", () =>
+        {
+            var group = new PluginGroupSnapshot
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Name = UniquePluginGroupName($"{node.Name} Group"),
+                Mode = node.Mode,
+                X = Math.Max(300, node.X - 8),
+                Y = Math.Max(80, node.Y - 8),
+                InputPins = Math.Min(2, Math.Max(1, node.MainInputPins)),
+                OutputPins = Math.Min(2, Math.Max(1, node.OutputPins))
+            };
+            _settings.PluginGroups.Add(group);
+            AddNodeToGroup(node, group);
+        }));
+
+        return item;
+    }
+
+    private void AddNodeToGroup(PluginNodeSnapshot node, PluginGroupSnapshot group)
+    {
+        foreach (var existingGroup in _settings.PluginGroups)
+        {
+            if (existingGroup.Id != group.Id)
+            {
+                existingGroup.MemberSlots.Remove(node.Slot);
+            }
+        }
+
+        group.Mode = node.Mode;
+        if (!group.MemberSlots.Contains(node.Slot))
+        {
+            group.MemberSlots.Add(node.Slot);
+        }
+
+        _selectedPluginGroupId = group.Id;
+        _selectedPluginNodeSlot = null;
+        EnsureGroupInternalConnections(group);
+        AppendLog($"Added {node.Name} to {group.Name}.");
+        RefreshEngineCallbackMode();
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private void RemoveNodeFromGroup(PluginNodeSnapshot node)
+    {
+        var group = GroupForNode(node.Slot);
+        if (group is null)
+        {
+            return;
+        }
+
+        group.MemberSlots.Remove(node.Slot);
+        AppendLog($"Removed {node.Name} from {group.Name}.");
+        RefreshEngineCallbackMode();
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
     }
 
     private void ShowNodeProperties(PluginNodeSnapshot node)
@@ -3948,6 +4855,249 @@ public partial class MainWindow : Window
     private void AddStereoSidechainInput(PluginNodeSnapshot node)
     {
         ReconfigurePluginNode(node, node.MainInputPins, 2, node.OutputPins);
+    }
+
+    private void ShowGroupProperties(PluginGroupSnapshot group)
+    {
+        var editor = new PluginGroupPropertiesWindow(
+            group,
+            GroupMembers(group).ToList(),
+            _settings.CanvasConnections,
+            (sourceSlot, sourcePin, destinationSlot, nativeDestinationPin) =>
+                _engine.TogglePluginModuleRoute(sourceSlot, sourcePin, destinationSlot, nativeDestinationPin))
+        {
+            Owner = this
+        };
+
+        editor.Applied += (_, _) =>
+        {
+            group.Name = string.IsNullOrWhiteSpace(editor.GroupName) ? "VST Group" : editor.GroupName.Trim();
+            group.InputPins = Math.Clamp(editor.InputPins, 1, 8);
+            group.OutputPins = Math.Clamp(editor.OutputPins, 1, 8);
+            group.SidechainPortsEnabled = editor.SidechainPortsEnabled;
+            group.SidechainInputPins = Math.Clamp(editor.SidechainInputPins, 1, 8);
+            group.SidechainOutputPins = Math.Clamp(editor.SidechainOutputPins, 1, 8);
+            group.MemberSlots = editor.MemberSlots
+                .Where(slot => _settings.PluginNodes.Any(node => node.Slot == slot))
+                .Distinct()
+                .ToList();
+
+            RefreshEngineCallbackMode();
+            RebuildVstNodeList();
+            RebuildRoutingCanvas();
+            QueueSave();
+        };
+
+        editor.Show();
+    }
+
+    private void AutoWirePluginGroup(PluginGroupSnapshot group)
+    {
+        EnsureGroupInternalConnections(group);
+        AppendLog($"{group.Name}: auto-wired adjacent VSTs by matching pins.");
+        RefreshEngineCallbackMode();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private void RemovePluginGroup(PluginGroupSnapshot group)
+    {
+        _settings.PluginGroups.Remove(group);
+        if (_selectedPluginGroupId == group.Id)
+        {
+            _selectedPluginGroupId = null;
+        }
+
+        AppendLog($"Removed VST group: {group.Name}.");
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private void CopyPluginGroup(PluginGroupSnapshot group)
+    {
+        var members = GroupMembers(group).ToList();
+        var slotMap = new Dictionary<int, PluginNodeSnapshot>();
+        var copiedGroup = new PluginGroupSnapshot
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Name = UniquePluginGroupName($"{group.Name} copy"),
+            Mode = group.Mode,
+            X = group.X + 28,
+            Y = group.Y + 28,
+            InputPins = group.InputPins,
+            OutputPins = group.OutputPins,
+            SidechainPortsEnabled = group.SidechainPortsEnabled,
+            SidechainInputPins = group.SidechainInputPins,
+            SidechainOutputPins = group.SidechainOutputPins,
+            PinsCollapsed = group.PinsCollapsed
+        };
+
+        foreach (var member in members)
+        {
+            if (member.PluginIndex < 0)
+            {
+                AppendLog($"{member.Name}: cannot copy older saved VST node without a plugin index.");
+                continue;
+            }
+
+            var copy = _engine.AddPluginNode(
+                new PluginChoice(member.PluginIndex, member.Name, string.Empty),
+                member.Mode,
+                member.MainInputPins,
+                member.SidechainInputPins,
+                member.OutputPins,
+                member.X + 28,
+                member.Y + 28);
+            if (copy is null)
+            {
+                AppendLog(_engine.StatusText);
+                continue;
+            }
+
+            copy.Bypassed = member.Bypassed;
+            copy.PinsCollapsed = member.PinsCollapsed;
+            if (copy.Bypassed)
+            {
+                _engine.SetPluginNodeBypassed(copy.Slot, true);
+            }
+
+            _settings.PluginNodes.Add(copy);
+            copiedGroup.MemberSlots.Add(copy.Slot);
+            slotMap[member.Slot] = copy;
+        }
+
+        foreach (var connection in _settings.CanvasConnections.ToArray())
+        {
+            if (connection.Kind == ConnectionGroupInputToNode &&
+                connection.FromGroupId == group.Id &&
+                slotMap.TryGetValue(connection.ToSlot, out var mappedDestination))
+            {
+                _settings.CanvasConnections.Add(new CanvasConnectionSnapshot
+                {
+                    Kind = ConnectionGroupInputToNode,
+                    FromKind = PinGroupInput,
+                    FromGroupId = copiedGroup.Id,
+                    FromMode = copiedGroup.Mode,
+                    FromPin = connection.FromPin,
+                    ToKind = PinNodeInput,
+                    ToMode = mappedDestination.Mode,
+                    ToSlot = mappedDestination.Slot,
+                    ToPin = connection.ToPin,
+                    From = GroupInputKey(copiedGroup.Id, connection.FromPin),
+                    To = NodeInputKey(mappedDestination.Slot, connection.ToPin)
+                });
+                continue;
+            }
+
+            if (connection.Kind == ConnectionNodeToGroupOutput &&
+                connection.ToGroupId == group.Id &&
+                slotMap.TryGetValue(connection.FromSlot, out var mappedSource))
+            {
+                _settings.CanvasConnections.Add(new CanvasConnectionSnapshot
+                {
+                    Kind = ConnectionNodeToGroupOutput,
+                    FromKind = PinNodeOutput,
+                    FromMode = mappedSource.Mode,
+                    FromSlot = mappedSource.Slot,
+                    FromPin = connection.FromPin,
+                    ToKind = PinGroupOutput,
+                    ToGroupId = copiedGroup.Id,
+                    ToMode = copiedGroup.Mode,
+                    ToPin = connection.ToPin,
+                    From = NodeOutputKey(mappedSource.Slot, connection.FromPin),
+                    To = GroupOutputKey(copiedGroup.Id, connection.ToPin)
+                });
+                continue;
+            }
+
+            if (connection.Kind != ConnectionNodeToNode ||
+                !slotMap.TryGetValue(connection.FromSlot, out var newSource) ||
+                !slotMap.TryGetValue(connection.ToSlot, out var newDestination))
+            {
+                continue;
+            }
+
+            var nativeDestinationPin = NativeInputPinForVisualPin(newDestination, connection.ToPin);
+            if (nativeDestinationPin < 0 ||
+                !_engine.TogglePluginModuleRoute(newSource.Slot, connection.FromPin, newDestination.Slot, nativeDestinationPin))
+            {
+                continue;
+            }
+
+            _settings.CanvasConnections.Add(new CanvasConnectionSnapshot
+            {
+                Kind = ConnectionNodeToNode,
+                FromKind = PinNodeOutput,
+                FromMode = newSource.Mode,
+                FromSlot = newSource.Slot,
+                FromPin = connection.FromPin,
+                ToKind = PinNodeInput,
+                ToMode = newDestination.Mode,
+                ToSlot = newDestination.Slot,
+                ToPin = connection.ToPin,
+                From = NodeOutputKey(newSource.Slot, connection.FromPin),
+                To = NodeInputKey(newDestination.Slot, connection.ToPin)
+            });
+        }
+
+        if (copiedGroup.MemberSlots.Count == 0)
+        {
+            AppendLog("Group copy did not create any VSTs.");
+            return;
+        }
+
+        _settings.PluginGroups.Add(copiedGroup);
+        _selectedPluginGroupId = copiedGroup.Id;
+        _selectedPluginNodeSlot = null;
+        EnsureGroupInternalConnections(copiedGroup);
+        AppendLog($"Copied VST group: {copiedGroup.Name}.");
+        RefreshEngineCallbackMode();
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private void EnsureGroupInternalConnections(PluginGroupSnapshot group)
+    {
+        var members = GroupMembers(group).ToList();
+        for (var index = 0; index < members.Count - 1; index++)
+        {
+            var source = members[index];
+            var destination = members[index + 1];
+            var pinCount = Math.Min(source.OutputPins, destination.MainInputPins);
+
+            for (var pin = 0; pin < pinCount; pin++)
+            {
+                var destinationVisualPin = destination.SidechainInputPins + pin;
+                if (FindNodeToNodeConnection(source.Slot, pin, destination.Slot, destinationVisualPin) is not null)
+                {
+                    continue;
+                }
+
+                var nativeDestinationPin = NativeInputPinForVisualPin(destination, destinationVisualPin);
+                if (nativeDestinationPin < 0 ||
+                    !_engine.TogglePluginModuleRoute(source.Slot, pin, destination.Slot, nativeDestinationPin))
+                {
+                    continue;
+                }
+
+                _settings.CanvasConnections.Add(new CanvasConnectionSnapshot
+                {
+                    Kind = ConnectionNodeToNode,
+                    FromKind = PinNodeOutput,
+                    FromMode = source.Mode,
+                    FromSlot = source.Slot,
+                    FromPin = pin,
+                    ToKind = PinNodeInput,
+                    ToMode = destination.Mode,
+                    ToSlot = destination.Slot,
+                    ToPin = destinationVisualPin,
+                    From = NodeOutputKey(source.Slot, pin),
+                    To = NodeInputKey(destination.Slot, destinationVisualPin)
+                });
+            }
+        }
     }
 
     private string NodePinSummary(PluginNodeSnapshot node)
@@ -4000,6 +5150,16 @@ public partial class MainWindow : Window
         node.SidechainInputPins = Math.Min(safeSidechainInputs, Math.Max(0, node.InputPins - node.MainInputPins));
         node.Bypassed = wasBypassed;
         _selectedPluginNodeSlot = node.Slot;
+        foreach (var group in _settings.PluginGroups)
+        {
+            for (var index = 0; index < group.MemberSlots.Count; index++)
+            {
+                if (group.MemberSlots[index] == oldSlot)
+                {
+                    group.MemberSlots[index] = node.Slot;
+                }
+            }
+        }
 
         if (wasBypassed)
         {
@@ -4127,6 +5287,35 @@ public partial class MainWindow : Window
                 migrated.ToMode = node.Mode;
                 migrated.To = NodeInputKey(node.Slot, newVisualPin);
             }
+            else if (migrated.Kind == ConnectionGroupInputToNode && migrated.ToSlot == oldSlot)
+            {
+                var newVisualPin = RemapInputVisualPin(
+                    migrated.ToPin,
+                    oldMainInputPins,
+                    oldSidechainInputPins,
+                    node.MainInputPins,
+                    node.SidechainInputPins);
+                if (newVisualPin < 0)
+                {
+                    continue;
+                }
+
+                migrated.ToSlot = node.Slot;
+                migrated.ToPin = newVisualPin;
+                migrated.ToMode = node.Mode;
+                migrated.To = NodeInputKey(node.Slot, newVisualPin);
+            }
+            else if (migrated.Kind == ConnectionNodeToGroupOutput && migrated.FromSlot == oldSlot)
+            {
+                if (migrated.FromPin < 0 || migrated.FromPin >= node.OutputPins || migrated.FromPin >= oldOutputPins)
+                {
+                    continue;
+                }
+
+                migrated.FromSlot = node.Slot;
+                migrated.FromMode = node.Mode;
+                migrated.From = NodeOutputKey(node.Slot, migrated.FromPin);
+            }
             else
             {
                 continue;
@@ -4148,11 +5337,13 @@ public partial class MainWindow : Window
             Kind = connection.Kind,
             FromKind = connection.FromKind,
             FromMode = connection.FromMode,
+            FromGroupId = connection.FromGroupId,
             FromChannel = connection.FromChannel,
             FromSlot = connection.FromSlot,
             FromPin = connection.FromPin,
             ToKind = connection.ToKind,
             ToMode = connection.ToMode,
+            ToGroupId = connection.ToGroupId,
             ToChannel = connection.ToChannel,
             ToSlot = connection.ToSlot,
             ToPin = connection.ToPin
@@ -4197,6 +5388,36 @@ public partial class MainWindow : Window
     private static int NodeInputVisualPinCount(PluginNodeSnapshot node)
     {
         return Math.Max(1, node.MainInputPins + node.SidechainInputPins);
+    }
+
+    private static IEnumerable<int> VisibleNodeInputPinIds(PluginNodeSnapshot node)
+    {
+        var allPins = Enumerable.Range(0, NodeInputVisualPinCount(node)).ToList();
+        if (!node.PinsCollapsed)
+        {
+            return allPins;
+        }
+
+        var visible = new List<int>();
+        if (node.SidechainInputPins > 0)
+        {
+            visible.AddRange(Enumerable.Range(0, Math.Min(CollapsedVisiblePinCount, node.SidechainInputPins)));
+        }
+
+        visible.AddRange(Enumerable.Range(0, Math.Min(CollapsedVisiblePinCount, node.MainInputPins))
+            .Select(pin => node.SidechainInputPins + pin));
+        return visible.Where(allPins.Contains).Distinct().ToList();
+    }
+
+    private static IEnumerable<int> VisibleNodeOutputPinIds(PluginNodeSnapshot node)
+    {
+        var allPins = Enumerable.Range(0, Math.Max(1, node.OutputPins)).ToList();
+        if (!node.PinsCollapsed)
+        {
+            return allPins;
+        }
+
+        return allPins.Take(Math.Min(CollapsedVisiblePinCount, allPins.Count)).ToList();
     }
 
     private void DrawNodePin(PluginNodeSnapshot node, int pinIndex, double x, double y, bool input)
@@ -4257,6 +5478,97 @@ public partial class MainWindow : Window
         {
             elements.Add(label);
         }
+    }
+
+    private void RegisterHiddenNodePinAnchors(PluginNodeSnapshot node, IReadOnlyList<int> visibleInputPins, IReadOnlyList<int> visibleOutputPins)
+    {
+        RegisterHiddenNodeSidePinAnchors(node, visibleInputPins, input: true);
+        RegisterHiddenNodeSidePinAnchors(node, visibleOutputPins, input: false);
+    }
+
+    private void RegisterHiddenNodeSidePinAnchors(PluginNodeSnapshot node, IReadOnlyList<int> visiblePins, bool input)
+    {
+        var allPins = input
+            ? Enumerable.Range(0, NodeInputVisualPinCount(node)).ToList()
+            : Enumerable.Range(0, node.OutputPins).ToList();
+        if (visiblePins.Count == 0 || visiblePins.Count >= allPins.Count)
+        {
+            return;
+        }
+
+        foreach (var pin in allPins.Where(pin => !visiblePins.Contains(pin)))
+        {
+            var anchorPin = AnchorPinForHiddenPin(visiblePins, pin);
+            var row = PinIndexOf(visiblePins, anchorPin);
+            if (row < 0)
+            {
+                continue;
+            }
+
+            var pinInfo = new CanvasPinInfo
+            {
+                Kind = input ? PinNodeInput : PinNodeOutput,
+                Mode = node.Mode,
+                Node = node,
+                Pin = pin,
+                Point = new Point(input ? node.X : node.X + VstNodeWidth, node.Y + 48 + (row * 18)),
+                Label = $"{node.Name} {(input ? "in" : "out")} {(input ? NodeInputPinLabel(node, pin) : NodeOutputPinLabel(node, pin))}"
+            };
+            _pinPositions[PinPositionKey(pinInfo)] = pinInfo.Point;
+        }
+    }
+
+    private void DrawHiddenNodePinSummary(PluginNodeSnapshot node, IReadOnlyList<int> visibleInputPins, IReadOnlyList<int> visibleOutputPins, double nodeHeight)
+    {
+        var hiddenInputPins = HiddenConnectedNodePins(node, visibleInputPins, input: true);
+        var hiddenOutputPins = HiddenConnectedNodePins(node, visibleOutputPins, input: false);
+        if (hiddenInputPins.Count == 0 && hiddenOutputPins.Count == 0)
+        {
+            return;
+        }
+
+        var text = string.Join("  ", new[]
+        {
+            hiddenInputPins.Count > 0 ? $"I: {FormatNodePins(node, hiddenInputPins, input: true)}" : string.Empty,
+            hiddenOutputPins.Count > 0 ? $"O: {FormatNodePins(node, hiddenOutputPins, input: false)}" : string.Empty
+        }.Where(static part => part.Length > 0));
+        var summary = new TextBlock
+        {
+            Text = text,
+            FontSize = 9,
+            FontWeight = FontWeights.Bold,
+            Foreground = (Brush)FindResource("DangerBrush"),
+            MaxWidth = VstNodeWidth - 16,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            IsHitTestVisible = false
+        };
+
+        Canvas.SetLeft(summary, node.X + 8);
+        Canvas.SetTop(summary, node.Y + nodeHeight - 18);
+        RoutingCanvas.Children.Add(summary);
+        if (_nodeVisualElements.TryGetValue(node.Slot, out var elements))
+        {
+            elements.Add(summary);
+        }
+    }
+
+    private List<int> HiddenConnectedNodePins(PluginNodeSnapshot node, IReadOnlyList<int> visiblePins, bool input)
+    {
+        var allPins = input
+            ? Enumerable.Range(0, NodeInputVisualPinCount(node))
+            : Enumerable.Range(0, node.OutputPins);
+        return allPins
+            .Where(pin => !visiblePins.Contains(pin))
+            .Where(pin => _settings.CanvasConnections.Any(connection =>
+                input
+                    ? connection.ToKind == PinNodeInput && connection.ToSlot == node.Slot && connection.ToPin == pin
+                    : connection.FromKind == PinNodeOutput && connection.FromSlot == node.Slot && connection.FromPin == pin))
+            .ToList();
+    }
+
+    private static string FormatNodePins(PluginNodeSnapshot node, IEnumerable<int> pins, bool input)
+    {
+        return string.Join(", ", pins.Select(pin => input ? NodeInputPinLabel(node, pin) : NodeOutputPinLabel(node, pin)));
     }
 
     private static bool IsSidechainVisualInputPin(PluginNodeSnapshot node, int visualPin)
@@ -4867,7 +6179,7 @@ public partial class MainWindow : Window
 
     private static double VstNodeHeight(PluginNodeSnapshot node)
     {
-        var pinRows = Math.Max(node.InputPins, node.OutputPins);
+        var pinRows = Math.Max(VisibleNodeInputPinIds(node).Count(), VisibleNodeOutputPinIds(node).Count());
         return Math.Max(96.0, 62.0 + (pinRows * 18.0));
     }
 
@@ -5234,6 +6546,8 @@ public partial class MainWindow : Window
             PinEndpointDestination => EndpointDestinationKey(pin.Mode, pin.Channel),
             PinNodeInput => NodeInputKey(pin.Node?.Slot ?? -1, pin.Pin),
             PinNodeOutput => NodeOutputKey(pin.Node?.Slot ?? -1, pin.Pin),
+            PinGroupInput => GroupInputKey(pin.Group?.Id ?? string.Empty, pin.Pin),
+            PinGroupOutput => GroupOutputKey(pin.Group?.Id ?? string.Empty, pin.Pin),
             _ => string.Empty
         };
     }
@@ -5249,6 +6563,12 @@ public partial class MainWindow : Window
 
     private static string NodeOutputKey(int slot, int pin) =>
         $"{PinNodeOutput}:{slot}:{pin}";
+
+    private static string GroupInputKey(string groupId, int pin) =>
+        $"{PinGroupInput}:{groupId}:{pin}";
+
+    private static string GroupOutputKey(string groupId, int pin) =>
+        $"{PinGroupOutput}:{groupId}:{pin}";
 
     private static string EndpointPinLabel(int pinCount, int offset)
     {
@@ -5360,8 +6680,8 @@ public partial class MainWindow : Window
     }
 
     private static string CanvasConnectionKey(CanvasConnectionSnapshot connection) =>
-        $"{connection.Kind}|{(int)connection.FromMode}|{connection.FromChannel}|{connection.FromSlot}|{connection.FromPin}|" +
-        $"{(int)connection.ToMode}|{connection.ToChannel}|{connection.ToSlot}|{connection.ToPin}";
+        $"{connection.Kind}|{(int)connection.FromMode}|{connection.FromGroupId}|{connection.FromChannel}|{connection.FromSlot}|{connection.FromPin}|" +
+        $"{(int)connection.ToMode}|{connection.ToGroupId}|{connection.ToChannel}|{connection.ToSlot}|{connection.ToPin}";
 
     private static string CrossRouteConnectionKey(CrossRouteConnectionInfo info) =>
         $"{info.SourceOffset}|{info.BusIndex}|{info.DestinationOffset}|{info.Label}";
@@ -5449,7 +6769,61 @@ public partial class MainWindow : Window
 
 
     private PluginNodeSnapshot? _draggingNode;
+    private PluginGroupSnapshot? _draggingGroup;
     private Point _dragOffset;
+
+    private void Group_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not Border { Tag: PluginGroupSnapshot group } border)
+        {
+            return;
+        }
+
+        if (e.ClickCount > 1)
+        {
+            ShowGroupProperties(group);
+            e.Handled = true;
+            return;
+        }
+
+        SelectPluginGroup(group.Id, rebuildCanvas: false);
+        _draggingGroup = group;
+        var point = e.GetPosition(RoutingCanvas);
+        _dragOffset = new Point(point.X - group.X, point.Y - group.Y);
+        CaptureDragOrigins(_groupVisualElements.TryGetValue(group.Id, out var elements) ? elements : [border]);
+        border.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void Group_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (_draggingGroup is null || e.LeftButton != MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        var point = e.GetPosition(RoutingCanvas);
+        var minX = (int)(VstCanvasWallMargin + VstEndpointCardWidth + 34);
+        var maxX = (int)Math.Max(minX, RoutingCanvas.Width - VstEndpointCardWidth - VstGroupWidth - (VstCanvasWallMargin * 2));
+        _draggingGroup.X = Math.Clamp((int)(point.X - _dragOffset.X), minX, maxX);
+        _draggingGroup.Y = Math.Max(30, (int)(point.Y - _dragOffset.Y));
+        MoveDragElements(_draggingGroup.X - _dragElementOrigins.Values.Min(static point => point.X), _draggingGroup.Y - _dragElementOrigins.Values.Min(static point => point.Y));
+        e.Handled = true;
+    }
+
+    private void Group_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is Border border)
+        {
+            border.ReleaseMouseCapture();
+        }
+
+        _draggingGroup = null;
+        _dragElementOrigins.Clear();
+        RebuildRoutingCanvas();
+        QueueSave();
+        e.Handled = true;
+    }
 
     private void Node_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
