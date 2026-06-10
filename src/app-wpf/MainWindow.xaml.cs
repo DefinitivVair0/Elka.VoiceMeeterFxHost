@@ -47,6 +47,10 @@ public partial class MainWindow : Window
     private bool _endpointDragMoved;
     private int? _selectedPluginNodeSlot;
     private bool _updatingChannelToggle;
+    private bool _updatingInsertAsioControls;
+    private bool _vstRoutingExpanded;
+    private bool _vbanToolsExpanded;
+    private bool _asioInsertExpanded;
 
     private const int DefaultVbanControlPort = 6981;
     private const string DefaultVbanControlStreamName = "Command1";
@@ -82,6 +86,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        RefreshToolCardExpansion();
 
         _saveTimer = new DispatcherTimer
         {
@@ -121,6 +126,7 @@ public partial class MainWindow : Window
         };
 
         LoadSettings();
+        BuildInsertAsioEndpointToggles();
         UpdatePluginFormatButtons();
         PopulatePluginList();
         SelectMode(_selectedMode);
@@ -130,6 +136,11 @@ public partial class MainWindow : Window
         AppendLog(_engine.StatusText);
         UpdateLiveStatusText();
         _statusTimer.Start();
+
+        if (_settings.InsertAsioAutoStart)
+        {
+            Dispatcher.BeginInvoke(new Action(() => StartInsertAsioFromUi(rememberRunning: true)), DispatcherPriority.ApplicationIdle);
+        }
     }
 
     private sealed class CanvasPinInfo
@@ -166,6 +177,36 @@ public partial class MainWindow : Window
     private void ChannelsWorkspaceButton_Click(object sender, RoutedEventArgs e) => SelectWorkspaceView(WorkspaceView.Channels);
 
     private void VstWorkspaceButton_Click(object sender, RoutedEventArgs e) => SelectWorkspaceView(WorkspaceView.Vst);
+
+    private void VstRoutingToggleButton_Click(object sender, RoutedEventArgs e)
+    {
+        _vstRoutingExpanded = !_vstRoutingExpanded;
+        RefreshToolCardExpansion();
+    }
+
+    private void VbanToolsToggleButton_Click(object sender, RoutedEventArgs e)
+    {
+        _vbanToolsExpanded = !_vbanToolsExpanded;
+        RefreshToolCardExpansion();
+    }
+
+    private void AsioInsertToggleButton_Click(object sender, RoutedEventArgs e)
+    {
+        _asioInsertExpanded = !_asioInsertExpanded;
+        RefreshToolCardExpansion();
+    }
+
+    private void RefreshToolCardExpansion()
+    {
+        SetVisibility(VstRoutingContentGrid, _vstRoutingExpanded);
+        SetVisibility(VbanToolsContentGrid, _vbanToolsExpanded);
+        SetVisibility(AsioInsertContentGrid, _asioInsertExpanded);
+    }
+
+    private static void SetVisibility(UIElement element, bool visible)
+    {
+        element.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     private void AddNodeButton_Click(object sender, RoutedEventArgs e)
     {
@@ -267,6 +308,162 @@ public partial class MainWindow : Window
         window.Show();
     }
 
+    private void ProbeInsertAsioButton_Click(object sender, RoutedEventArgs e)
+    {
+        var status = _engine.ProbeInsertAsio(_kind);
+        InsertAsioStatusTextBlock.Text = status;
+        AppendLog(status);
+    }
+
+    private void RefreshAfterInsertAsioStateChange()
+    {
+        _engine.RefreshVoicemeeterParameters();
+        _lastSelectedPatchBypassState = null;
+        BuildInsertAsioEndpointToggles();
+        ApplyEngineState();
+        RefreshEndpointButtonSelection();
+        BuildChannelStrips();
+        RebuildRoutingCanvas();
+        UpdateLiveStatusText();
+    }
+
+    private void StartInsertAsioButton_Click(object sender, RoutedEventArgs e)
+    {
+        StartInsertAsioFromUi(rememberRunning: true);
+    }
+
+    private void StartInsertAsioFromUi(bool rememberRunning)
+    {
+        var status = _engine.StartInsertAsio(_kind);
+        InsertAsioStatusTextBlock.Text = status;
+        AppendLog(status);
+        if (_engine.IsInsertAsioRunning)
+        {
+            ApplyInsertAsioPatchSelection();
+            if (rememberRunning)
+            {
+                _settings.InsertAsioAutoStart = true;
+                SetInsertAsioAutoStartCheckBox(true);
+                QueueSave();
+            }
+        }
+
+        RefreshAfterInsertAsioStateChange();
+    }
+
+    private void StopInsertAsioButton_Click(object sender, RoutedEventArgs e)
+    {
+        var status = _engine.StopInsertAsio();
+        InsertAsioStatusTextBlock.Text = status;
+        AppendLog(status);
+        _settings.InsertAsioAutoStart = false;
+        SetInsertAsioAutoStartCheckBox(false);
+        QueueSave();
+        RefreshAfterInsertAsioStateChange();
+    }
+
+    private void InsertAsioAutoStart_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loading || _updatingInsertAsioControls)
+        {
+            return;
+        }
+
+        _settings.InsertAsioAutoStart = InsertAsioAutoStartCheckBox.IsChecked == true;
+        QueueSave();
+    }
+
+    private void SetInsertAsioAutoStartCheckBox(bool value)
+    {
+        _updatingInsertAsioControls = true;
+        try
+        {
+            InsertAsioAutoStartCheckBox.IsChecked = value;
+        }
+        finally
+        {
+            _updatingInsertAsioControls = false;
+        }
+    }
+
+    private void BuildInsertAsioEndpointToggles()
+    {
+        InsertAsioEndpointTogglesPanel.Children.Clear();
+        _settings.InsertAsioEndpointKeys ??= [];
+
+        foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
+        {
+            var key = endpoint.Key(CallbackMode.Input);
+            var toggle = new CheckBox
+            {
+                Content = endpoint.Name,
+                Tag = endpoint,
+                IsChecked = _settings.InsertAsioEndpointKeys.Contains(key, StringComparer.OrdinalIgnoreCase),
+                Foreground = (Brush)FindResource("RouteAccentBrush"),
+                Margin = new Thickness(0, 0, 12, 6),
+                ToolTip = "Arm this input's Patch.insert channels for the Elka Insert ASIO host. Unchecked inputs are left on the normal VoiceMeeter path."
+            };
+
+            toggle.Checked += InsertAsioEndpointToggle_Changed;
+            toggle.Unchecked += InsertAsioEndpointToggle_Changed;
+            InsertAsioEndpointTogglesPanel.Children.Add(toggle);
+        }
+    }
+
+    private void InsertAsioEndpointToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loading || _updatingInsertAsioControls || sender is not CheckBox { Tag: IoEndpoint endpoint } toggle)
+        {
+            return;
+        }
+
+        SetInsertAsioEndpointArmed(endpoint, toggle.IsChecked == true);
+        QueueSave();
+        if (_engine.IsInsertAsioRunning)
+        {
+            ApplyInsertAsioPatchSelection();
+        }
+
+        RefreshAfterInsertAsioStateChange();
+    }
+
+    private void SetInsertAsioEndpointArmed(IoEndpoint endpoint, bool armed)
+    {
+        _settings.InsertAsioEndpointKeys ??= [];
+        var key = endpoint.Key(CallbackMode.Input);
+        _settings.InsertAsioEndpointKeys.RemoveAll(existing => string.Equals(existing, key, StringComparison.OrdinalIgnoreCase));
+        if (armed)
+        {
+            _settings.InsertAsioEndpointKeys.Add(key);
+        }
+    }
+
+    private bool IsEndpointArmedForInsertAsio(IoEndpoint endpoint)
+    {
+        _settings.InsertAsioEndpointKeys ??= [];
+        var key = endpoint.Key(CallbackMode.Input);
+        return _settings.InsertAsioEndpointKeys.Contains(key, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void ApplyInsertAsioPatchSelection()
+    {
+        if (!_engine.IsInsertAsioRunning)
+        {
+            return;
+        }
+
+        foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
+        {
+            var armed = IsEndpointArmedForInsertAsio(endpoint);
+            for (var channel = endpoint.Range.Start; channel <= endpoint.Range.End; channel++)
+            {
+                _engine.SetPatchInsertEnabled(channel, armed);
+            }
+        }
+
+        _engine.RefreshVoicemeeterParameters();
+    }
+
     private void OpenVfxCommandsButton_Click(object sender, RoutedEventArgs e)
     {
         OpenVfxCommandsWindow();
@@ -350,9 +547,11 @@ public partial class MainWindow : Window
             _settings.PluginScanFolders ??= [];
             _settings.EndpointCanvasYOffsets ??= [];
             _settings.EndpointRouteHues ??= [];
+            _settings.InsertAsioEndpointKeys ??= [];
             NormalizePluginScanFolders();
             _kind = _settings.Kind == VoicemeeterKind.Unknown ? VoicemeeterKind.Potato : _settings.Kind;
             _selectedMode = _settings.SelectedMode == CallbackMode.None ? CallbackMode.Input : _settings.SelectedMode;
+            SetInsertAsioAutoStartCheckBox(_settings.InsertAsioAutoStart);
             PluginSearchTextBox.Text = _settings.PluginSearchText;
             PopulatePluginFolderList();
             VbanEnableCheckBox.IsChecked = _settings.VbanControlEnabled;
@@ -400,6 +599,8 @@ public partial class MainWindow : Window
             ? DefaultVbanControlStreamName
             : VbanStreamTextBox.Text.Trim();
         _settings.VbanControlLocalOnly = VbanLocalOnlyCheckBox.IsChecked != false;
+        _settings.InsertAsioAutoStart = InsertAsioAutoStartCheckBox.IsChecked == true;
+        _settings.InsertAsioEndpointKeys ??= [];
         _settings.Endpoints = _settingsByEndpoint.Values
             .Select(static settings => settings.ToSnapshot())
             .ToList();
@@ -1010,6 +1211,7 @@ public partial class MainWindow : Window
         }
 
         ProbeStatusTextBlock.Text = probeText;
+        InsertAsioStatusTextBlock.Text = _engine.InsertAsioStatus();
     }
 
     private void CopyDiagnosticsButton_Click(object sender, RoutedEventArgs e)
@@ -1214,18 +1416,32 @@ public partial class MainWindow : Window
 
     private CallbackMode ComputeActiveCallbackMode()
     {
-        var active = _selectedMode == CallbackMode.None ? CallbackMode.Input : _selectedMode;
+        var active = _selectedMode == CallbackMode.None || (_engine.IsInsertAsioRunning && _selectedMode == CallbackMode.Input)
+            ? CallbackMode.None
+            : _selectedMode;
 
         foreach (var settings in _settingsByEndpoint.Values)
         {
-            if (settings.HasActiveChannels && !IsInputPatchBypassEndpoint(settings.Mode, settings.Endpoint, out _))
+            if (!settings.HasActiveChannels || IsInputPatchBypassEndpoint(settings.Mode, settings.Endpoint, out _))
             {
-                active |= settings.Mode;
+                continue;
             }
+
+            if (settings.Mode == CallbackMode.Input && IsEndpointHandledByInsertAsio(settings.Endpoint))
+            {
+                continue;
+            }
+
+            active |= settings.Mode;
         }
 
         foreach (var node in _settings.PluginNodes)
         {
+            if (node.Mode == CallbackMode.Input && !InputPluginNodeNeedsVoiceMeeterInputCallback(node))
+            {
+                continue;
+            }
+
             active |= node.Mode;
         }
 
@@ -1245,7 +1461,39 @@ public partial class MainWindow : Window
             active |= mode;
         }
 
-        return active == CallbackMode.None ? CallbackMode.Input : active;
+        return active == CallbackMode.None
+            ? _engine.IsInsertAsioRunning ? CallbackMode.Output : CallbackMode.Input
+            : active;
+    }
+
+    private bool IsEndpointHandledByInsertAsio(IoEndpoint endpoint)
+    {
+        return _engine.IsInsertAsioRunning && IsEndpointArmedForInsertAsio(endpoint);
+    }
+
+    private bool InputPluginNodeNeedsVoiceMeeterInputCallback(PluginNodeSnapshot node)
+    {
+        if (node.Mode != CallbackMode.Input || !_engine.IsInsertAsioRunning)
+        {
+            return true;
+        }
+
+        var sourceKeys = SourceInputEndpointKeysForNode(node.Slot, []);
+        if (sourceKeys.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var key in sourceKeys)
+        {
+            var endpoint = EndpointForKey(key);
+            if (endpoint is null || !IsEndpointArmedForInsertAsio(endpoint))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void BuildEndpointButtons()
@@ -1329,6 +1577,12 @@ public partial class MainWindow : Window
             return false;
         }
 
+        var armedForInsertAsio = _engine.IsInsertAsioRunning && IsEndpointArmedForInsertAsio(endpoint);
+        if (armedForInsertAsio)
+        {
+            return false;
+        }
+
         var parts = new List<string>();
         if (asioPatches.Count > 0)
         {
@@ -1346,9 +1600,12 @@ public partial class MainWindow : Window
             parts.Add($"Virtual ASIO insert on CH {string.Join("/", insertChannels)} ({postFx})");
         }
 
+        var nextStep = _engine.IsInsertAsioRunning
+            ? "Tick this input in the Insert ASIO card to let Elka own its Patch.insert channels, or use Output/Bus FX."
+            : "Start Insert ASIO and tick this input to process it here, or use the Output/Bus canvas for this source.";
         explanation =
             $"{endpoint.DisplayName}: Input FX is unavailable because VoiceMeeter reports {string.Join("; ", parts)}. " +
-            "This ASIO/insert path is not exposed as isolated input-callback audio here; use the Output/Bus canvas for this source.";
+            nextStep;
         return true;
     }
 
@@ -1672,6 +1929,13 @@ public partial class MainWindow : Window
         var isStripEnabled = isSendStrip
             ? routeDestination is not null && settings.RouteEnabled[offset]
             : settings.Enabled[offset];
+        var mainInputDelayUnavailable = !isSendStrip &&
+                                        settings.Mode == CallbackMode.Input &&
+                                        IsEndpointHandledByInsertAsio(settings.Endpoint);
+        var delayControlsEnabled = !mainInputDelayUnavailable && (!isSendStrip || routeDestination is not null);
+        var delayControlToolTip = mainInputDelayUnavailable
+            ? "Main input delay is unavailable while this input is owned by Insert ASIO. Use the per-output send delay or a delay VST instead."
+            : null;
 
         var border = new Border
         {
@@ -1769,16 +2033,20 @@ public partial class MainWindow : Window
         {
             Text = "Delay",
             FontSize = 11,
-            Foreground = (Brush)FindResource("DelayAccentBrush"),
+            Foreground = mainInputDelayUnavailable
+                ? (Brush)FindResource("MutedBrush")
+                : (Brush)FindResource("DelayAccentBrush"),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, 4)
+            Margin = new Thickness(0, 0, 0, 4),
+            ToolTip = delayControlToolTip
         });
 
         var delaySliderHost = new Grid
         {
             Width = 44,
             Height = 128,
-            HorizontalAlignment = HorizontalAlignment.Center
+            HorizontalAlignment = HorizontalAlignment.Center,
+            ToolTip = delayControlToolTip
         };
         delaySliderHost.Children.Add(new Border
         {
@@ -1786,8 +2054,11 @@ public partial class MainWindow : Window
             Height = 128,
             HorizontalAlignment = HorizontalAlignment.Center,
             Background = (Brush)FindResource("FieldBrush"),
-            BorderBrush = (Brush)FindResource("DelayAccentBrush"),
-            BorderThickness = new Thickness(1)
+            BorderBrush = mainInputDelayUnavailable
+                ? (Brush)FindResource("SubtleBorderBrush")
+                : (Brush)FindResource("DelayAccentBrush"),
+            BorderThickness = new Thickness(1),
+            Opacity = mainInputDelayUnavailable ? 0.55 : 1.0
         });
         var delaySlider = new Slider
         {
@@ -1797,7 +2068,7 @@ public partial class MainWindow : Window
             Value = isSendStrip ? routeDestination?.DelayMilliseconds ?? 0.0 : settings.DelayMilliseconds[offset],
             Width = 34,
             Height = 128,
-            IsEnabled = !isSendStrip || routeDestination is not null,
+            IsEnabled = delayControlsEnabled,
             Foreground = (Brush)FindResource("DelayAccentBrush"),
             BorderBrush = (Brush)FindResource("VbanAccentBrush"),
             Background = Brushes.Transparent,
@@ -1805,7 +2076,9 @@ public partial class MainWindow : Window
             TickFrequency = 10,
             IsSnapToTickEnabled = false,
             SmallChange = 1,
-            LargeChange = 10
+            LargeChange = 10,
+            Opacity = mainInputDelayUnavailable ? 0.45 : 1.0,
+            ToolTip = delayControlToolTip
         };
         var delayText = new TextBox
         {
@@ -1814,13 +2087,21 @@ public partial class MainWindow : Window
                 : $"{settings.DelayMilliseconds[offset]:0}",
             Width = 54,
             MinHeight = 28,
-            IsEnabled = !isSendStrip || routeDestination is not null,
+            IsEnabled = delayControlsEnabled,
             HorizontalContentAlignment = HorizontalAlignment.Center,
             Margin = new Thickness(0, 6, 0, 0),
-            BorderBrush = (Brush)FindResource("DelayAccentBrush")
+            BorderBrush = mainInputDelayUnavailable
+                ? (Brush)FindResource("SubtleBorderBrush")
+                : (Brush)FindResource("DelayAccentBrush"),
+            ToolTip = delayControlToolTip
         };
         delaySlider.ValueChanged += (_, _) =>
         {
+            if (!delayControlsEnabled)
+            {
+                return;
+            }
+
             var rounded = Math.Round(delaySlider.Value);
             if (isSendStrip)
             {
@@ -1867,9 +2148,12 @@ public partial class MainWindow : Window
         {
             Text = "ms",
             FontSize = 11,
-            Foreground = (Brush)FindResource("DelayAccentBrush"),
+            Foreground = mainInputDelayUnavailable
+                ? (Brush)FindResource("MutedBrush")
+                : (Brush)FindResource("DelayAccentBrush"),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 2, 0, 0)
+            Margin = new Thickness(0, 2, 0, 0),
+            ToolTip = delayControlToolTip
         });
 
         var volumeStack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
@@ -2289,11 +2573,11 @@ public partial class MainWindow : Window
         });
         var postInsertSend = new CheckBox
         {
-            Content = "Main callback send",
+            Content = "Main callback send for ASIO buses",
             IsChecked = settings.PostInsertSend,
             Foreground = (Brush)FindResource("RouteAccentBrush"),
             Margin = new Thickness(0, 10, 0, 0),
-            ToolTip = "Experimental console-style route. Leave this off to test the normal Input+Output callback route suggested for ASIO insert checks."
+            ToolTip = "Use this for ASIO/Patch Insert sources when sending this input to A/B buses from the channel routing canvas."
         };
         postInsertSend.Checked += (_, _) => SetEndpointPostInsertSend(settings, true);
         postInsertSend.Unchecked += (_, _) => SetEndpointPostInsertSend(settings, false);
@@ -4112,6 +4396,49 @@ public partial class MainWindow : Window
                 }
 
                 keys.UnionWith(SourceEndpointKeysForNode(connection.FromSlot, visitedSlots));
+            }
+        }
+
+        return keys;
+    }
+
+    private HashSet<string> SourceInputEndpointKeysForNode(int slot, HashSet<int> visitedSlots)
+    {
+        if (!visitedSlots.Add(slot))
+        {
+            return [];
+        }
+
+        var keys = new HashSet<string>();
+        var targetNode = _settings.PluginNodes.FirstOrDefault(node => node.Slot == slot);
+        foreach (var connection in _settings.CanvasConnections)
+        {
+            if (connection.Kind == ConnectionEndpointToNode && connection.ToSlot == slot)
+            {
+                if (targetNode is not null && IsSidechainVisualInputPin(targetNode, connection.ToPin))
+                {
+                    continue;
+                }
+
+                if (connection.FromMode != CallbackMode.Input)
+                {
+                    continue;
+                }
+
+                var endpoint = EndpointForChannel(connection.FromMode, connection.FromChannel);
+                if (endpoint is not null)
+                {
+                    keys.Add(endpoint.Key(connection.FromMode));
+                }
+            }
+            else if (connection.Kind == ConnectionNodeToNode && connection.ToSlot == slot)
+            {
+                if (targetNode is not null && IsSidechainVisualInputPin(targetNode, connection.ToPin))
+                {
+                    continue;
+                }
+
+                keys.UnionWith(SourceInputEndpointKeysForNode(connection.FromSlot, visitedSlots));
             }
         }
 

@@ -59,6 +59,10 @@ Build, Visual Studio, and release-publish instructions are in
 9. Drag from a left endpoint pin into the plugin input pin, then from the plugin output pin back to a right endpoint pin.
 10. Open the plugin editor from the node list or right-click menu to confirm audio is reaching the plugin.
 
+For ASIO or VoiceMeeter Patch Insert sources, use the **Insert ASIO** card to
+start the insert host and tick only the input sections Elka should own. Those
+ticks are saved and applied again when **Auto-start** is enabled.
+
 Changes are live. The app starts and maintains the native callback engine
 automatically; there is no separate Start/Stop button for normal use.
 
@@ -139,6 +143,11 @@ normal path.
 
 Direct routing is intended for input-to-output channel work. It is separate from
 the VST node graph.
+
+For ASIO or VoiceMeeter Patch Insert sources, enable **Main callback send for
+ASIO buses** on the left source card when sending that input directly to `A` or
+`B` buses. The normal Input+Output route is for sources exposed by the regular
+input callback; ASIO/Patch Insert return audio needs the main callback bus path.
 
 ## VST Routing Panel
 

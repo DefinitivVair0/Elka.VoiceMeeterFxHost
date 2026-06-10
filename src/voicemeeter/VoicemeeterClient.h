@@ -43,6 +43,7 @@ public:
     bool getConfiguredSampleRate(int& sampleRate) const noexcept;
     bool refreshParameters() const noexcept;
     bool getParameterFloat(const char* parameterName, float& value) const noexcept;
+    bool setParameterFloat(const char* parameterName, float value) const noexcept;
     bool getLevel(int type, int channel, float& value) const noexcept;
 
 private:

@@ -124,6 +124,9 @@
               <StackPanel Grid.Row="2"
                           Grid.Column="1">
                 <TextBlock x:Name="ProbeStatusTextBlock"
+                           MinHeight="64"
+                           MaxHeight="64"
+                           ClipToBounds="True"
                            Text="Select an input strip to probe callback stages."
                            Style="{StaticResource MutedText}"
                            TextWrapping="Wrap" />
@@ -138,28 +141,29 @@
             </Grid>
           </Border>
 
-          <Border Style="{StaticResource PanelCard}"
+          <Border x:Name="VstRoutingCard"
+                  Style="{StaticResource PanelCard}"
                   BorderBrush="{StaticResource RouteAccentBrush}"
                   Margin="0,0,0,16">
             <Grid>
               <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
               </Grid.RowDefinitions>
 
-              <Grid Grid.Row="0" Margin="0,0,0,10">
+              <Grid Grid.Row="0">
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="*" />
                   <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="VST Routing"
-                           FontSize="18"
-                           FontWeight="SemiBold"
-                           Foreground="{StaticResource RouteAccentBrush}"
-                           VerticalAlignment="Center" />
+                <Button x:Name="VstRoutingToggleButton"
+                        Content="VST Routing"
+                        HorizontalContentAlignment="Left"
+                        FontSize="18"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource RouteAccentBrush}"
+                        Style="{StaticResource RouteButton}"
+                        Click="VstRoutingToggleButton_Click" />
                 <Button Grid.Column="1"
                         x:Name="AddNodeButton"
                         Content="Add Node"
@@ -168,87 +172,99 @@
                         Click="AddNodeButton_Click" />
               </Grid>
 
-              <Grid Grid.Row="1" Margin="0,0,0,8">
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="Auto" />
-                  <ColumnDefinition Width="*" />
-                  <ColumnDefinition Width="Auto" />
-                  <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <Button Content="Add Folder"
-                        Width="96"
-                        Margin="0,0,8,0"
-                        Style="{StaticResource RouteButton}"
-                        Click="AddPluginFolderButton_Click"
-                        ToolTip="Add a custom VST folder to the scan list." />
-                <TextBox x:Name="PluginSearchTextBox"
-                         Grid.Column="1"
-                         ToolTip="Filter the scanned plugin list by name."
-                         TextChanged="PluginSearchTextBox_TextChanged" />
-                <StackPanel Grid.Column="2"
-                            Orientation="Horizontal"
-                            Margin="8,0,0,0">
-                  <Button x:Name="PluginFormatAllButton"
-                          Content="All"
-                          Width="50"
-                          Padding="8,6"
-                          Style="{StaticResource RouteButton}"
-                          Tag="All"
-                          Click="PluginFormatFilterButton_Click" />
-                  <Button x:Name="PluginFormatVst3Button"
-                          Content="VST3"
-                          Width="58"
-                          Padding="8,6"
-                          Margin="6,0,0,0"
-                          Style="{StaticResource RouteButton}"
-                          Tag="Vst3"
-                          Click="PluginFormatFilterButton_Click" />
-                  <Button x:Name="PluginFormatVst2Button"
-                          Content="VST2"
-                          Width="58"
-                          Padding="8,6"
-                          Margin="6,0,0,0"
-                          Style="{StaticResource RouteButton}"
-                          Tag="Vst2"
-                          Click="PluginFormatFilterButton_Click" />
-                </StackPanel>
-                <Button Grid.Column="3"
-                        x:Name="ScanButton"
-                        Content="Scan"
-                        Width="72"
-                        Margin="8,0,0,0"
-                        Style="{StaticResource RouteButton}"
-                        Click="ScanButton_Click" />
-              </Grid>
+              <Grid x:Name="VstRoutingContentGrid"
+                    Grid.Row="1"
+                    Margin="0,10,0,0"
+                    Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
 
-              <Grid Grid.Row="2" Margin="0,0,0,8">
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="*" />
-                  <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <ListBox x:Name="PluginFoldersListBox"
-                         Height="68"
+                <Grid Grid.Row="0" Margin="0,0,0,8">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <Button Content="Add Folder"
+                          Width="96"
+                          Margin="0,0,8,0"
+                          Style="{StaticResource RouteButton}"
+                          Click="AddPluginFolderButton_Click"
+                          ToolTip="Add a custom VST folder to the scan list." />
+                  <TextBox x:Name="PluginSearchTextBox"
+                           Grid.Column="1"
+                           ToolTip="Filter the scanned plugin list by name."
+                           TextChanged="PluginSearchTextBox_TextChanged" />
+                  <StackPanel Grid.Column="2"
+                              Orientation="Horizontal"
+                              Margin="8,0,0,0">
+                    <Button x:Name="PluginFormatAllButton"
+                            Content="All"
+                            Width="50"
+                            Padding="8,6"
+                            Style="{StaticResource RouteButton}"
+                            Tag="All"
+                            Click="PluginFormatFilterButton_Click" />
+                    <Button x:Name="PluginFormatVst3Button"
+                            Content="VST3"
+                            Width="58"
+                            Padding="8,6"
+                            Margin="6,0,0,0"
+                            Style="{StaticResource RouteButton}"
+                            Tag="Vst3"
+                            Click="PluginFormatFilterButton_Click" />
+                    <Button x:Name="PluginFormatVst2Button"
+                            Content="VST2"
+                            Width="58"
+                            Padding="8,6"
+                            Margin="6,0,0,0"
+                            Style="{StaticResource RouteButton}"
+                            Tag="Vst2"
+                            Click="PluginFormatFilterButton_Click" />
+                  </StackPanel>
+                  <Button Grid.Column="3"
+                          x:Name="ScanButton"
+                          Content="Scan"
+                          Width="72"
+                          Margin="8,0,0,0"
+                          Style="{StaticResource RouteButton}"
+                          Click="ScanButton_Click" />
+                </Grid>
+
+                <Grid Grid.Row="1" Margin="0,0,0,8">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <ListBox x:Name="PluginFoldersListBox"
+                           Height="68"
+                           ScrollViewer.VerticalScrollBarVisibility="Auto"
+                           SelectionChanged="PluginFoldersListBox_SelectionChanged"
+                           ToolTip="Custom VST folders scanned together with the normal system VST locations." />
+                  <Button x:Name="RemovePluginFolderButton"
+                          Grid.Column="1"
+                          Content="Remove"
+                          Width="76"
+                          Margin="8,0,0,0"
+                          VerticalAlignment="Top"
+                          Click="RemovePluginFolderButton_Click" />
+                </Grid>
+
+                <ListBox x:Name="PluginListBox"
+                         Grid.Row="2"
+                         Height="132"
                          ScrollViewer.VerticalScrollBarVisibility="Auto"
-                         SelectionChanged="PluginFoldersListBox_SelectionChanged"
-                         ToolTip="Custom VST folders scanned together with the normal system VST locations." />
-                <Button x:Name="RemovePluginFolderButton"
-                        Grid.Column="1"
-                        Content="Remove"
-                        Width="76"
-                        Margin="8,0,0,0"
-                        VerticalAlignment="Top"
-                        Click="RemovePluginFolderButton_Click" />
+                         MouseDoubleClick="PluginListBox_MouseDoubleClick" />
+
+                <StackPanel x:Name="VstNodesPanel"
+                            Grid.Row="3"
+                            Margin="0,10,0,0" />
               </Grid>
-
-              <ListBox x:Name="PluginListBox"
-                       Grid.Row="3"
-                       Height="132"
-                       ScrollViewer.VerticalScrollBarVisibility="Auto"
-                       MouseDoubleClick="PluginListBox_MouseDoubleClick" />
-
-              <StackPanel x:Name="VstNodesPanel"
-                          Grid.Row="4"
-                          Margin="0,10,0,0" />
             </Grid>
           </Border>
 
@@ -279,42 +295,64 @@
             </Grid>
           </Border>
 
-          <Border Style="{StaticResource PanelCard}">
+          <Border x:Name="VbanToolsCard"
+                  Style="{StaticResource PanelCard}"
+                  BorderBrush="{StaticResource VbanAccentBrush}"
+                  Margin="0,0,0,16">
             <Grid>
               <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="*" />
               </Grid.RowDefinitions>
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-              </Grid.ColumnDefinitions>
 
-              <TextBlock Grid.Row="0"
-                         Grid.Column="0"
-                         Text="Tools"
-                         FontSize="18"
-                         FontWeight="SemiBold" />
-              <Button Grid.Row="0"
-                      Grid.Column="1"
-                      Content="Single Ping"
-                      Width="112"
-                      Click="SinglePingButton_Click" />
+              <Button x:Name="VbanToolsToggleButton"
+                      Grid.Row="0"
+                      Content="VBAN"
+                      HorizontalContentAlignment="Left"
+                      FontSize="18"
+                      FontWeight="SemiBold"
+                      Foreground="{StaticResource VbanAccentBrush}"
+                      BorderBrush="{StaticResource VbanAccentBrush}"
+                      Style="{StaticResource RouteButton}"
+                      Click="VbanToolsToggleButton_Click" />
 
-              <Grid Grid.Row="1"
-                    Grid.ColumnSpan="2"
-                    Margin="0,12,0,8">
+              <Grid x:Name="VbanToolsContentGrid"
+                    Grid.Row="1"
+                    Margin="0,10,0,0"
+                    Visibility="Collapsed">
                 <Grid.RowDefinitions>
                   <RowDefinition Height="Auto" />
                   <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="0,0,0,10">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="VBAN tools"
+                             VerticalAlignment="Center"
+                             Style="{StaticResource MutedText}" />
+                  <Button Grid.Column="1"
+                          Content="Single Ping"
+                          Width="112"
+                          Click="SinglePingButton_Click" />
+                  <Button Grid.Column="2"
+                          Content="VFX Commands"
+                          Width="124"
+                          Margin="8,0,0,0"
+                          Click="OpenVfxCommandsButton_Click" />
+                </Grid>
+
+                <Grid Grid.Row="1">
+                  <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                  </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="Auto" />
                   <ColumnDefinition Width="Auto" />
                   <ColumnDefinition Width="*" />
-                  <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
                 <CheckBox x:Name="VbanEnableCheckBox"
@@ -337,15 +375,9 @@
                          HorizontalAlignment="Left"
                          Text="6981"
                          ToolTip="UDP port used by the VBAN-TEXT command listener." />
-                <Button Grid.Row="0"
-                        Grid.Column="3"
-                        Content="VFX Commands"
-                        Width="124"
-                        Margin="8,0,0,0"
-                        Click="OpenVfxCommandsButton_Click" />
 
                 <StackPanel Grid.Row="1"
-                            Grid.ColumnSpan="4"
+                            Grid.ColumnSpan="3"
                             Orientation="Horizontal"
                             Margin="0,8,0,0">
                   <TextBlock Text="Stream"
@@ -368,16 +400,112 @@
                              VerticalAlignment="Center"
                              Style="{StaticResource MutedText}" />
                 </StackPanel>
+                </Grid>
               </Grid>
+            </Grid>
+          </Border>
 
+          <Border x:Name="AsioInsertCard"
+                  Style="{StaticResource PanelCard}"
+                  BorderBrush="{StaticResource RouteAccentBrush}"
+                  Margin="0,0,0,16">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+              </Grid.RowDefinitions>
+
+              <Button x:Name="AsioInsertToggleButton"
+                      Grid.Row="0"
+                      Content="ASIO Insert"
+                      HorizontalContentAlignment="Left"
+                      FontSize="18"
+                      FontWeight="SemiBold"
+                      Foreground="{StaticResource RouteAccentBrush}"
+                      Style="{StaticResource RouteButton}"
+                      Click="AsioInsertToggleButton_Click" />
+
+              <Grid x:Name="AsioInsertContentGrid"
+                    Grid.Row="1"
+                    Margin="0,10,0,0"
+                    Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Row="0"
+                            Grid.Column="0"
+                            Orientation="Horizontal">
+                  <TextBlock Text="pass-through prototype"
+                             Style="{StaticResource MutedText}"
+                             VerticalAlignment="Center" />
+                  <CheckBox x:Name="InsertAsioAutoStartCheckBox"
+                            Content="Auto-start"
+                            Margin="12,0,0,0"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource MutedTextBrush}"
+                            Checked="InsertAsioAutoStart_Changed"
+                            Unchecked="InsertAsioAutoStart_Changed" />
+                </StackPanel>
+                <StackPanel Grid.Row="0"
+                            Grid.Column="1"
+                            Orientation="Horizontal">
+                  <Button Content="Probe"
+                          Width="64"
+                          Padding="8,5"
+                          Style="{StaticResource RouteButton}"
+                          Click="ProbeInsertAsioButton_Click" />
+                  <Button Content="Start"
+                          Width="64"
+                          Padding="8,5"
+                          Margin="6,0,0,0"
+                          Style="{StaticResource RouteButton}"
+                          Click="StartInsertAsioButton_Click" />
+                  <Button Content="Stop"
+                          Width="64"
+                          Padding="8,5"
+                          Margin="6,0,0,0"
+                          Style="{StaticResource RouteButton}"
+                          Click="StopInsertAsioButton_Click" />
+                </StackPanel>
+                <TextBlock x:Name="InsertAsioStatusTextBlock"
+                           Grid.Row="1"
+                           Grid.ColumnSpan="2"
+                           Text="Insert ASIO host stopped."
+                           Margin="0,8,0,0"
+                           TextWrapping="Wrap"
+                           Style="{StaticResource MutedText}" />
+                <WrapPanel x:Name="InsertAsioEndpointTogglesPanel"
+                           Grid.Row="2"
+                           Grid.ColumnSpan="2"
+                           Margin="0,8,0,0" />
+              </Grid>
+            </Grid>
+          </Border>
+
+          <Border Style="{StaticResource PanelCard}">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+              </Grid.RowDefinitions>
+
+              <TextBlock Grid.Row="0"
+                         Text="Log"
+                         FontSize="18"
+                         FontWeight="SemiBold" />
               <TextBlock x:Name="RouteSummaryTextBlock"
-                         Grid.Row="2"
-                         Grid.ColumnSpan="2"
-                         Margin="0,4,0,8"
+                         Grid.Row="1"
+                         Margin="0,8,0,8"
                          Style="{StaticResource MutedText}" />
               <TextBox x:Name="LogTextBox"
-                       Grid.Row="3"
-                       Grid.ColumnSpan="2"
+                       Grid.Row="2"
                        Height="110"
                        FontFamily="Consolas"
                        FontSize="13"

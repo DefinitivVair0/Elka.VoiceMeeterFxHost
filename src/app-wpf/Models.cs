@@ -404,6 +404,8 @@ internal sealed class FxHostSettings
     public int VbanControlPort { get; set; } = 6981;
     public string VbanControlStreamName { get; set; } = "Command1";
     public bool VbanControlLocalOnly { get; set; } = true;
+    public bool InsertAsioAutoStart { get; set; }
+    public List<string> InsertAsioEndpointKeys { get; set; } = [];
     public List<ChannelSettingsSnapshot> Endpoints { get; set; } = [];
     public List<PluginNodeSnapshot> PluginNodes { get; set; } = [];
     public List<CanvasConnectionSnapshot> CanvasConnections { get; set; } = [];
@@ -724,9 +726,77 @@ internal sealed class NativeEngineClient : IDisposable
         return _attached ? ElkaFx_GetPatchInsertEnabled(Math.Max(0, inputChannel)) : -1;
     }
 
+    public bool SetPatchInsertEnabled(int inputChannel, bool enabled)
+    {
+        return _attached && ElkaFx_SetPatchInsertEnabled(Math.Max(0, inputChannel), enabled ? 1 : 0) == 0;
+    }
+
     public int GetPatchPostFxInsertEnabled()
     {
         return _attached ? ElkaFx_GetPatchPostFxInsertEnabled() : -1;
+    }
+
+    public string ProbeInsertAsio(VoicemeeterKind kind)
+    {
+        if (!_attached)
+        {
+            return _lastStatus;
+        }
+
+        var status = new StringBuilder(1024);
+        ElkaFx_ProbeInsertAsio(ExpectedInsertAsioChannelCount(kind), status, status.Capacity);
+        _lastStatus = status.ToString();
+        return _lastStatus;
+    }
+
+    public string StartInsertAsio(VoicemeeterKind kind)
+    {
+        if (!_attached)
+        {
+            return _lastStatus;
+        }
+
+        var status = new StringBuilder(1024);
+        ElkaFx_StartInsertAsio(ExpectedInsertAsioChannelCount(kind), status, status.Capacity);
+        _lastStatus = status.ToString();
+        return _lastStatus;
+    }
+
+    public string StopInsertAsio()
+    {
+        if (!_attached)
+        {
+            return _lastStatus;
+        }
+
+        var status = new StringBuilder(1024);
+        ElkaFx_StopInsertAsio(status, status.Capacity);
+        _lastStatus = status.ToString();
+        return _lastStatus;
+    }
+
+    public string InsertAsioStatus()
+    {
+        if (!_attached)
+        {
+            return "Native engine is not attached.";
+        }
+
+        var status = new StringBuilder(1024);
+        ElkaFx_GetInsertAsioStatus(status, status.Capacity);
+        return status.ToString();
+    }
+
+    public bool IsInsertAsioRunning => _attached && ElkaFx_IsInsertAsioRunning() != 0;
+
+    private static int ExpectedInsertAsioChannelCount(VoicemeeterKind kind)
+    {
+        return kind switch
+        {
+            VoicemeeterKind.Standard => 12,
+            VoicemeeterKind.Banana => 22,
+            _ => 34
+        };
     }
 
     public void ApplyChannelSettings(EndpointChannelSettings settings)
@@ -1098,6 +1168,24 @@ internal sealed class NativeEngineClient : IDisposable
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_GetPatchPostFxInsertEnabled();
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_ProbeInsertAsio(int expectedChannelCount, StringBuilder status, int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_StartInsertAsio(int expectedChannelCount, StringBuilder status, int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void ElkaFx_StopInsertAsio(StringBuilder status, int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void ElkaFx_GetInsertAsioStatus(StringBuilder status, int statusChars);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_IsInsertAsioRunning();
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_SetPatchInsertEnabled(int inputChannel, int enabled);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_GetPluginCount();
