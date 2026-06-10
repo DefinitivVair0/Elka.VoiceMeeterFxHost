@@ -184,14 +184,6 @@ bool VoicemeeterClient::getParameterFloat(const char* parameterName, float& valu
     return api.getParameterFloat(parameterName, &value) == 0;
 }
 
-bool VoicemeeterClient::setParameterFloat(const char* parameterName, float value) const noexcept
-{
-    if (parameterName == nullptr)
-        return false;
-
-    return api.setParameterFloat(parameterName, value) == 0;
-}
-
 bool VoicemeeterClient::getLevel(int type, int channel, float& value) const noexcept
 {
     value = 0.0f;

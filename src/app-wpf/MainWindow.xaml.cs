@@ -36,6 +36,9 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, List<FrameworkElement>> _endpointVisualElements = [];
     private CrossRoutePinInfo? _crossRouteDragStart;
     private Path? _crossRoutePreview;
+    private string? _selectedCanvasConnectionKey;
+    private string? _selectedCrossRouteConnectionKey;
+    private string? _selectedDirectChannelRouteKey;
     private int _expandedCrossRouteBusIndex = -1;
     private int _selectedCrossRouteBusIndex = -1;
     private bool? _lastSelectedPatchBypassState;
@@ -47,10 +50,8 @@ public partial class MainWindow : Window
     private bool _endpointDragMoved;
     private int? _selectedPluginNodeSlot;
     private bool _updatingChannelToggle;
-    private bool _updatingInsertAsioControls;
-    private bool _vstRoutingExpanded;
-    private bool _vbanToolsExpanded;
-    private bool _asioInsertExpanded;
+    private CallbackMode _vstCanvasMode = CallbackMode.Input;
+    private VstInputCanvasRouteView _vstInputCanvasRouteView = VstInputCanvasRouteView.InputReturn;
 
     private const int DefaultVbanControlPort = 6981;
     private const string DefaultVbanControlStreamName = "Command1";
@@ -83,10 +84,15 @@ public partial class MainWindow : Window
         Vst
     }
 
+    private enum VstInputCanvasRouteView
+    {
+        InputReturn,
+        DirectOutput
+    }
+
     public MainWindow()
     {
         InitializeComponent();
-        RefreshToolCardExpansion();
 
         _saveTimer = new DispatcherTimer
         {
@@ -117,6 +123,7 @@ public partial class MainWindow : Window
         VbanStreamTextBox.LostFocus += VbanControl_LostFocus;
         VbanPortTextBox.KeyDown += VbanControl_KeyDown;
         VbanStreamTextBox.KeyDown += VbanControl_KeyDown;
+        PreviewKeyDown += MainWindow_PreviewKeyDown;
         VstWorkspaceView.SizeChanged += (_, _) =>
         {
             if (_workspaceView == WorkspaceView.Vst)
@@ -126,7 +133,6 @@ public partial class MainWindow : Window
         };
 
         LoadSettings();
-        BuildInsertAsioEndpointToggles();
         UpdatePluginFormatButtons();
         PopulatePluginList();
         SelectMode(_selectedMode);
@@ -136,11 +142,6 @@ public partial class MainWindow : Window
         AppendLog(_engine.StatusText);
         UpdateLiveStatusText();
         _statusTimer.Start();
-
-        if (_settings.InsertAsioAutoStart)
-        {
-            Dispatcher.BeginInvoke(new Action(() => StartInsertAsioFromUi(rememberRunning: true)), DispatcherPriority.ApplicationIdle);
-        }
     }
 
     private sealed class CanvasPinInfo
@@ -166,7 +167,13 @@ public partial class MainWindow : Window
         public string Label { get; init; } = string.Empty;
     }
 
+    private sealed record CrossRouteConnectionInfo(int SourceOffset, int BusIndex, int DestinationOffset, string Label);
+
     private sealed record RouteHueChoice(string Name, string Key, string StrokeHex, string FillHex);
+
+    private sealed record VstGraphChannelRoute(int SourceChannel, int DestinationChannel);
+
+    private sealed record DirectChannelRouteInfo(int SourceChannel, int DestinationChannel, string Label);
 
     private void InputModeButton_Click(object sender, RoutedEventArgs e) => SelectMode(CallbackMode.Input);
 
@@ -178,34 +185,41 @@ public partial class MainWindow : Window
 
     private void VstWorkspaceButton_Click(object sender, RoutedEventArgs e) => SelectWorkspaceView(WorkspaceView.Vst);
 
+    private void VstInputReturnButton_Click(object sender, RoutedEventArgs e)
+    {
+        SelectVstInputCanvasRouteView(VstInputCanvasRouteView.InputReturn);
+    }
+
+    private void VstInputDirectButton_Click(object sender, RoutedEventArgs e)
+    {
+        SelectVstInputCanvasRouteView(VstInputCanvasRouteView.DirectOutput);
+    }
+
+    private void VstOutputReturnButton_Click(object sender, RoutedEventArgs e)
+    {
+        SelectVstOutputCanvasRouteView();
+    }
+
     private void VstRoutingToggleButton_Click(object sender, RoutedEventArgs e)
     {
-        _vstRoutingExpanded = !_vstRoutingExpanded;
-        RefreshToolCardExpansion();
+        ToggleCardContent(VstRoutingContentGrid);
     }
 
-    private void VbanToolsToggleButton_Click(object sender, RoutedEventArgs e)
+    private void VbanTextToggleButton_Click(object sender, RoutedEventArgs e)
     {
-        _vbanToolsExpanded = !_vbanToolsExpanded;
-        RefreshToolCardExpansion();
+        ToggleCardContent(VbanTextContentGrid);
     }
 
-    private void AsioInsertToggleButton_Click(object sender, RoutedEventArgs e)
+    private void AsioPatchToggleButton_Click(object sender, RoutedEventArgs e)
     {
-        _asioInsertExpanded = !_asioInsertExpanded;
-        RefreshToolCardExpansion();
+        ToggleCardContent(AsioPatchContentGrid);
     }
 
-    private void RefreshToolCardExpansion()
+    private static void ToggleCardContent(UIElement content)
     {
-        SetVisibility(VstRoutingContentGrid, _vstRoutingExpanded);
-        SetVisibility(VbanToolsContentGrid, _vbanToolsExpanded);
-        SetVisibility(AsioInsertContentGrid, _asioInsertExpanded);
-    }
-
-    private static void SetVisibility(UIElement element, bool visible)
-    {
-        element.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        content.Visibility = content.Visibility == Visibility.Visible
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 
     private void AddNodeButton_Click(object sender, RoutedEventArgs e)
@@ -308,162 +322,6 @@ public partial class MainWindow : Window
         window.Show();
     }
 
-    private void ProbeInsertAsioButton_Click(object sender, RoutedEventArgs e)
-    {
-        var status = _engine.ProbeInsertAsio(_kind);
-        InsertAsioStatusTextBlock.Text = status;
-        AppendLog(status);
-    }
-
-    private void RefreshAfterInsertAsioStateChange()
-    {
-        _engine.RefreshVoicemeeterParameters();
-        _lastSelectedPatchBypassState = null;
-        BuildInsertAsioEndpointToggles();
-        ApplyEngineState();
-        RefreshEndpointButtonSelection();
-        BuildChannelStrips();
-        RebuildRoutingCanvas();
-        UpdateLiveStatusText();
-    }
-
-    private void StartInsertAsioButton_Click(object sender, RoutedEventArgs e)
-    {
-        StartInsertAsioFromUi(rememberRunning: true);
-    }
-
-    private void StartInsertAsioFromUi(bool rememberRunning)
-    {
-        var status = _engine.StartInsertAsio(_kind);
-        InsertAsioStatusTextBlock.Text = status;
-        AppendLog(status);
-        if (_engine.IsInsertAsioRunning)
-        {
-            ApplyInsertAsioPatchSelection();
-            if (rememberRunning)
-            {
-                _settings.InsertAsioAutoStart = true;
-                SetInsertAsioAutoStartCheckBox(true);
-                QueueSave();
-            }
-        }
-
-        RefreshAfterInsertAsioStateChange();
-    }
-
-    private void StopInsertAsioButton_Click(object sender, RoutedEventArgs e)
-    {
-        var status = _engine.StopInsertAsio();
-        InsertAsioStatusTextBlock.Text = status;
-        AppendLog(status);
-        _settings.InsertAsioAutoStart = false;
-        SetInsertAsioAutoStartCheckBox(false);
-        QueueSave();
-        RefreshAfterInsertAsioStateChange();
-    }
-
-    private void InsertAsioAutoStart_Changed(object sender, RoutedEventArgs e)
-    {
-        if (_loading || _updatingInsertAsioControls)
-        {
-            return;
-        }
-
-        _settings.InsertAsioAutoStart = InsertAsioAutoStartCheckBox.IsChecked == true;
-        QueueSave();
-    }
-
-    private void SetInsertAsioAutoStartCheckBox(bool value)
-    {
-        _updatingInsertAsioControls = true;
-        try
-        {
-            InsertAsioAutoStartCheckBox.IsChecked = value;
-        }
-        finally
-        {
-            _updatingInsertAsioControls = false;
-        }
-    }
-
-    private void BuildInsertAsioEndpointToggles()
-    {
-        InsertAsioEndpointTogglesPanel.Children.Clear();
-        _settings.InsertAsioEndpointKeys ??= [];
-
-        foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
-        {
-            var key = endpoint.Key(CallbackMode.Input);
-            var toggle = new CheckBox
-            {
-                Content = endpoint.Name,
-                Tag = endpoint,
-                IsChecked = _settings.InsertAsioEndpointKeys.Contains(key, StringComparer.OrdinalIgnoreCase),
-                Foreground = (Brush)FindResource("RouteAccentBrush"),
-                Margin = new Thickness(0, 0, 12, 6),
-                ToolTip = "Arm this input's Patch.insert channels for the Elka Insert ASIO host. Unchecked inputs are left on the normal VoiceMeeter path."
-            };
-
-            toggle.Checked += InsertAsioEndpointToggle_Changed;
-            toggle.Unchecked += InsertAsioEndpointToggle_Changed;
-            InsertAsioEndpointTogglesPanel.Children.Add(toggle);
-        }
-    }
-
-    private void InsertAsioEndpointToggle_Changed(object sender, RoutedEventArgs e)
-    {
-        if (_loading || _updatingInsertAsioControls || sender is not CheckBox { Tag: IoEndpoint endpoint } toggle)
-        {
-            return;
-        }
-
-        SetInsertAsioEndpointArmed(endpoint, toggle.IsChecked == true);
-        QueueSave();
-        if (_engine.IsInsertAsioRunning)
-        {
-            ApplyInsertAsioPatchSelection();
-        }
-
-        RefreshAfterInsertAsioStateChange();
-    }
-
-    private void SetInsertAsioEndpointArmed(IoEndpoint endpoint, bool armed)
-    {
-        _settings.InsertAsioEndpointKeys ??= [];
-        var key = endpoint.Key(CallbackMode.Input);
-        _settings.InsertAsioEndpointKeys.RemoveAll(existing => string.Equals(existing, key, StringComparison.OrdinalIgnoreCase));
-        if (armed)
-        {
-            _settings.InsertAsioEndpointKeys.Add(key);
-        }
-    }
-
-    private bool IsEndpointArmedForInsertAsio(IoEndpoint endpoint)
-    {
-        _settings.InsertAsioEndpointKeys ??= [];
-        var key = endpoint.Key(CallbackMode.Input);
-        return _settings.InsertAsioEndpointKeys.Contains(key, StringComparer.OrdinalIgnoreCase);
-    }
-
-    private void ApplyInsertAsioPatchSelection()
-    {
-        if (!_engine.IsInsertAsioRunning)
-        {
-            return;
-        }
-
-        foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
-        {
-            var armed = IsEndpointArmedForInsertAsio(endpoint);
-            for (var channel = endpoint.Range.Start; channel <= endpoint.Range.End; channel++)
-            {
-                _engine.SetPatchInsertEnabled(channel, armed);
-            }
-        }
-
-        _engine.RefreshVoicemeeterParameters();
-    }
-
     private void OpenVfxCommandsButton_Click(object sender, RoutedEventArgs e)
     {
         OpenVfxCommandsWindow();
@@ -547,11 +405,9 @@ public partial class MainWindow : Window
             _settings.PluginScanFolders ??= [];
             _settings.EndpointCanvasYOffsets ??= [];
             _settings.EndpointRouteHues ??= [];
-            _settings.InsertAsioEndpointKeys ??= [];
             NormalizePluginScanFolders();
             _kind = _settings.Kind == VoicemeeterKind.Unknown ? VoicemeeterKind.Potato : _settings.Kind;
             _selectedMode = _settings.SelectedMode == CallbackMode.None ? CallbackMode.Input : _settings.SelectedMode;
-            SetInsertAsioAutoStartCheckBox(_settings.InsertAsioAutoStart);
             PluginSearchTextBox.Text = _settings.PluginSearchText;
             PopulatePluginFolderList();
             VbanEnableCheckBox.IsChecked = _settings.VbanControlEnabled;
@@ -578,6 +434,7 @@ public partial class MainWindow : Window
                 _settingsByEndpoint[settings.Key] = settings;
             }
 
+            MigratePlainInputOutputCanvasRoutesToSharedChannelRoutes();
         }
         finally
         {
@@ -599,8 +456,6 @@ public partial class MainWindow : Window
             ? DefaultVbanControlStreamName
             : VbanStreamTextBox.Text.Trim();
         _settings.VbanControlLocalOnly = VbanLocalOnlyCheckBox.IsChecked != false;
-        _settings.InsertAsioAutoStart = InsertAsioAutoStartCheckBox.IsChecked == true;
-        _settings.InsertAsioEndpointKeys ??= [];
         _settings.Endpoints = _settingsByEndpoint.Values
             .Select(static settings => settings.ToSnapshot())
             .ToList();
@@ -616,6 +471,31 @@ public partial class MainWindow : Window
 
         _saveTimer.Stop();
         _saveTimer.Start();
+    }
+
+    private void MigratePlainInputOutputCanvasRoutesToSharedChannelRoutes()
+    {
+        var migrated = 0;
+        foreach (var connection in _settings.CanvasConnections.ToArray())
+        {
+            if (connection.Kind != ConnectionEndpointToEndpoint ||
+                connection.FromMode != CallbackMode.Input ||
+                connection.ToMode != CallbackMode.Output)
+            {
+                continue;
+            }
+
+            if (AddSharedDirectChannelRoute(connection.FromChannel, connection.ToChannel))
+            {
+                _settings.CanvasConnections.Remove(connection);
+                migrated++;
+            }
+        }
+
+        if (migrated > 0)
+        {
+            AppendLog($"Migrated {migrated} plain input-to-output cable(s) into shared channel routes.");
+        }
     }
 
     private void AddPluginScanFolder(string folder)
@@ -717,6 +597,24 @@ public partial class MainWindow : Window
         ApplyVbanControlSettingsFromUi(showErrors: true);
         QueueSave();
         e.Handled = true;
+    }
+
+    private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key is not Key.Delete and not Key.Back)
+        {
+            return;
+        }
+
+        if (Keyboard.FocusedElement is TextBox)
+        {
+            return;
+        }
+
+        if (DeleteSelectedConnection())
+        {
+            e.Handled = true;
+        }
     }
 
     private void ApplyVbanControlSettingsFromUi(bool showErrors)
@@ -1154,14 +1052,25 @@ public partial class MainWindow : Window
 
     private void SelectMode(CallbackMode mode)
     {
+        _vstCanvasMode = mode;
+        SetSelectedSideMode(mode);
+        BuildEndpointButtons();
+        if (_workspaceView == WorkspaceView.Vst)
+        {
+            RebuildRoutingCanvas();
+        }
+        QueueSave();
+    }
+
+    private void SetSelectedSideMode(CallbackMode mode)
+    {
         _selectedMode = mode;
         SetButtonTone(InputModeButton, mode == CallbackMode.Input);
         SetButtonTone(OutputModeButton, mode == CallbackMode.Output);
         SetButtonTone(MainModeButton, mode == CallbackMode.Main);
+        RefreshVstRouteViewButtons();
         RefreshEngineCallbackMode();
         UpdateLiveStatusText();
-        BuildEndpointButtons();
-        QueueSave();
     }
 
     private void UpdateLiveStatusText()
@@ -1211,7 +1120,6 @@ public partial class MainWindow : Window
         }
 
         ProbeStatusTextBlock.Text = probeText;
-        InsertAsioStatusTextBlock.Text = _engine.InsertAsioStatus();
     }
 
     private void CopyDiagnosticsButton_Click(object sender, RoutedEventArgs e)
@@ -1342,6 +1250,7 @@ public partial class MainWindow : Window
         VstWorkspaceView.Visibility = view == WorkspaceView.Vst ? Visibility.Visible : Visibility.Collapsed;
         SetWorkspaceButtonTone(ChannelsWorkspaceButton, view == WorkspaceView.Channels);
         SetWorkspaceButtonTone(VstWorkspaceButton, view == WorkspaceView.Vst);
+        RefreshVstRouteViewButtons();
 
         if (view == WorkspaceView.Channels)
         {
@@ -1350,6 +1259,56 @@ public partial class MainWindow : Window
         }
 
         RebuildRoutingCanvas();
+    }
+
+    private void SelectVstInputCanvasRouteView(VstInputCanvasRouteView view)
+    {
+        var sideModeChanged = false;
+        _vstCanvasMode = CallbackMode.Input;
+        _vstInputCanvasRouteView = view;
+
+        if (view == VstInputCanvasRouteView.InputReturn || _selectedMode == CallbackMode.Main)
+        {
+            sideModeChanged = _selectedMode != CallbackMode.Input;
+            SetSelectedSideMode(CallbackMode.Input);
+        }
+
+        RefreshVstRouteViewButtons();
+        if (sideModeChanged)
+        {
+            BuildEndpointButtons();
+        }
+
+        RebuildRoutingCanvas();
+    }
+
+    private void SelectVstOutputCanvasRouteView()
+    {
+        var sideModeChanged = _selectedMode != CallbackMode.Output;
+        _vstCanvasMode = CallbackMode.Output;
+        SetSelectedSideMode(CallbackMode.Output);
+
+        if (sideModeChanged)
+        {
+            BuildEndpointButtons();
+        }
+
+        RebuildRoutingCanvas();
+    }
+
+    private void RefreshVstRouteViewButtons()
+    {
+        var showRouteView = _workspaceView == WorkspaceView.Vst;
+        VstRouteViewPanel.Visibility = showRouteView ? Visibility.Visible : Visibility.Collapsed;
+        SetWorkspaceButtonTone(
+            VstInputReturnButton,
+            _vstCanvasMode == CallbackMode.Input &&
+            _vstInputCanvasRouteView == VstInputCanvasRouteView.InputReturn);
+        SetWorkspaceButtonTone(
+            VstInputDirectButton,
+            _vstCanvasMode == CallbackMode.Input &&
+            _vstInputCanvasRouteView == VstInputCanvasRouteView.DirectOutput);
+        SetWorkspaceButtonTone(VstOutputReturnButton, _vstCanvasMode == CallbackMode.Output);
     }
 
     private void SetButtonTone(Button button, bool selected)
@@ -1416,32 +1375,18 @@ public partial class MainWindow : Window
 
     private CallbackMode ComputeActiveCallbackMode()
     {
-        var active = _selectedMode == CallbackMode.None || (_engine.IsInsertAsioRunning && _selectedMode == CallbackMode.Input)
-            ? CallbackMode.None
-            : _selectedMode;
+        var active = _selectedMode == CallbackMode.None ? CallbackMode.Input : _selectedMode;
 
         foreach (var settings in _settingsByEndpoint.Values)
         {
-            if (!settings.HasActiveChannels || IsInputPatchBypassEndpoint(settings.Mode, settings.Endpoint, out _))
+            if (settings.HasActiveChannels && !IsInputPatchBypassEndpoint(settings.Mode, settings.Endpoint, out _))
             {
-                continue;
+                active |= settings.Mode;
             }
-
-            if (settings.Mode == CallbackMode.Input && IsEndpointHandledByInsertAsio(settings.Endpoint))
-            {
-                continue;
-            }
-
-            active |= settings.Mode;
         }
 
         foreach (var node in _settings.PluginNodes)
         {
-            if (node.Mode == CallbackMode.Input && !InputPluginNodeNeedsVoiceMeeterInputCallback(node))
-            {
-                continue;
-            }
-
             active |= node.Mode;
         }
 
@@ -1461,39 +1406,7 @@ public partial class MainWindow : Window
             active |= mode;
         }
 
-        return active == CallbackMode.None
-            ? _engine.IsInsertAsioRunning ? CallbackMode.Output : CallbackMode.Input
-            : active;
-    }
-
-    private bool IsEndpointHandledByInsertAsio(IoEndpoint endpoint)
-    {
-        return _engine.IsInsertAsioRunning && IsEndpointArmedForInsertAsio(endpoint);
-    }
-
-    private bool InputPluginNodeNeedsVoiceMeeterInputCallback(PluginNodeSnapshot node)
-    {
-        if (node.Mode != CallbackMode.Input || !_engine.IsInsertAsioRunning)
-        {
-            return true;
-        }
-
-        var sourceKeys = SourceInputEndpointKeysForNode(node.Slot, []);
-        if (sourceKeys.Count == 0)
-        {
-            return false;
-        }
-
-        foreach (var key in sourceKeys)
-        {
-            var endpoint = EndpointForKey(key);
-            if (endpoint is null || !IsEndpointArmedForInsertAsio(endpoint))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return active == CallbackMode.None ? CallbackMode.Input : active;
     }
 
     private void BuildEndpointButtons()
@@ -1577,12 +1490,6 @@ public partial class MainWindow : Window
             return false;
         }
 
-        var armedForInsertAsio = _engine.IsInsertAsioRunning && IsEndpointArmedForInsertAsio(endpoint);
-        if (armedForInsertAsio)
-        {
-            return false;
-        }
-
         var parts = new List<string>();
         if (asioPatches.Count > 0)
         {
@@ -1600,12 +1507,9 @@ public partial class MainWindow : Window
             parts.Add($"Virtual ASIO insert on CH {string.Join("/", insertChannels)} ({postFx})");
         }
 
-        var nextStep = _engine.IsInsertAsioRunning
-            ? "Tick this input in the Insert ASIO card to let Elka own its Patch.insert channels, or use Output/Bus FX."
-            : "Start Insert ASIO and tick this input to process it here, or use the Output/Bus canvas for this source.";
         explanation =
             $"{endpoint.DisplayName}: Input FX is unavailable because VoiceMeeter reports {string.Join("; ", parts)}. " +
-            nextStep;
+            "This ASIO/insert path is not exposed as isolated input-callback audio here; use the Output/Bus canvas for this source.";
         return true;
     }
 
@@ -1629,6 +1533,14 @@ public partial class MainWindow : Window
         BuildChannelStrips();
         RebuildRoutingCanvas();
         QueueSave();
+    }
+
+    private void SelectCanvasEndpoint(CallbackMode endpointMode, IoEndpoint endpoint)
+    {
+        var sideMode = endpointMode == CallbackMode.Output ? CallbackMode.Output : CallbackMode.Input;
+        _settings.SelectedEndpointName = endpoint.Name;
+        SetSelectedSideMode(sideMode);
+        BuildEndpointButtons();
     }
 
     private void UpdateProbeSelection(CallbackMode endpointMode, IoEndpoint endpoint)
@@ -1677,7 +1589,7 @@ public partial class MainWindow : Window
     private ContextMenu BuildEndpointContextMenu(CallbackMode mode, IoEndpoint endpoint)
     {
         var menu = new ContextMenu();
-        menu.Items.Add(CreateNodeMenuItem("Select Section", () => SelectEndpoint(mode, endpoint)));
+        menu.Items.Add(CreateNodeMenuItem("Select Section", () => SelectCanvasEndpoint(mode, endpoint)));
         menu.Items.Add(new Separator());
         var patchBypassed = IsInputPatchBypassEndpoint(mode, endpoint, out var patchExplanation);
         if (patchBypassed)
@@ -1691,19 +1603,22 @@ public partial class MainWindow : Window
             menu.Items.Add(new Separator());
         }
 
-        var currentMode = EndpointPinModeFor(mode, endpoint);
-        var stereo = CreateNodeMenuItem("Stereo", () => SetEndpointPinMode(mode, endpoint, EndpointPinMode.Stereo));
-        stereo.IsCheckable = true;
-        stereo.IsChecked = currentMode == EndpointPinMode.Stereo;
-        stereo.IsEnabled = !patchBypassed;
-        menu.Items.Add(stereo);
+        if (CanChangeEndpointPinMode(endpoint))
+        {
+            var currentMode = EndpointPinModeFor(mode, endpoint);
+            var stereo = CreateNodeMenuItem("Stereo", () => SetEndpointPinMode(mode, endpoint, EndpointPinMode.Stereo));
+            stereo.IsCheckable = true;
+            stereo.IsChecked = currentMode == EndpointPinMode.Stereo;
+            stereo.IsEnabled = !patchBypassed;
+            menu.Items.Add(stereo);
 
-        var full = CreateNodeMenuItem(endpoint.ChannelCount > 2 ? $"Advanced / Full ({endpoint.ChannelCount})" : "Full", () => SetEndpointPinMode(mode, endpoint, EndpointPinMode.Full));
-        full.IsCheckable = true;
-        full.IsChecked = currentMode == EndpointPinMode.Full;
-        full.IsEnabled = !patchBypassed;
-        menu.Items.Add(full);
-        menu.Items.Add(new Separator());
+            var full = CreateNodeMenuItem($"Advanced / Full ({endpoint.ChannelCount})", () => SetEndpointPinMode(mode, endpoint, EndpointPinMode.Full));
+            full.IsCheckable = true;
+            full.IsChecked = currentMode == EndpointPinMode.Full;
+            full.IsEnabled = !patchBypassed;
+            menu.Items.Add(full);
+            menu.Items.Add(new Separator());
+        }
 
         var hueMenu = new MenuItem { Header = "Route Hue" };
         var currentHue = EndpointRouteHueKey(endpoint.Key(mode));
@@ -1723,6 +1638,74 @@ public partial class MainWindow : Window
         return menu;
     }
 
+    private ContextMenu BuildCanvasPinContextMenu(CanvasPinInfo pinInfo, ContextMenu? baseMenu = null)
+    {
+        var menu = baseMenu ?? new ContextMenu();
+        var connections = _settings.CanvasConnections
+            .Where(connection => ConnectionTouchesPin(connection, pinInfo))
+            .ToList();
+
+        if (connections.Count == 0)
+        {
+            return menu;
+        }
+
+        if (menu.Items.Count > 0)
+        {
+            menu.Items.Add(new Separator());
+        }
+
+        if (connections.Count == 1)
+        {
+            var connection = connections[0];
+            menu.Items.Add(CreateNodeMenuItem("Disconnect Cable", () => DisconnectCanvasConnection(connection)));
+            return menu;
+        }
+
+        var disconnectMenu = new MenuItem { Header = "Disconnect Cable" };
+        foreach (var connection in connections)
+        {
+            disconnectMenu.Items.Add(CreateNodeMenuItem(CanvasConnectionLabel(connection), () => DisconnectCanvasConnection(connection)));
+        }
+
+        menu.Items.Add(disconnectMenu);
+        return menu;
+    }
+
+    private bool ConnectionTouchesPin(CanvasConnectionSnapshot connection, CanvasPinInfo pinInfo)
+    {
+        return pinInfo.Kind switch
+        {
+            PinEndpointSource => connection.FromKind == PinEndpointSource &&
+                                 connection.FromMode == pinInfo.Mode &&
+                                 connection.FromChannel == pinInfo.Channel,
+            PinEndpointDestination => connection.ToKind == PinEndpointDestination &&
+                                      connection.ToMode == pinInfo.Mode &&
+                                      connection.ToChannel == pinInfo.Channel,
+            PinNodeInput => connection.ToKind == PinNodeInput &&
+                            pinInfo.Node is not null &&
+                            connection.ToSlot == pinInfo.Node.Slot &&
+                            connection.ToPin == pinInfo.Pin,
+            PinNodeOutput => connection.FromKind == PinNodeOutput &&
+                             pinInfo.Node is not null &&
+                             connection.FromSlot == pinInfo.Node.Slot &&
+                             connection.FromPin == pinInfo.Pin,
+            _ => false
+        };
+    }
+
+    private string CanvasConnectionLabel(CanvasConnectionSnapshot connection)
+    {
+        return connection.Kind switch
+        {
+            ConnectionEndpointToEndpoint => $"CH {connection.FromChannel + 1} -> CH {connection.ToChannel + 1}",
+            ConnectionEndpointToNode => $"CH {connection.FromChannel + 1} -> node input {connection.ToPin + 1}",
+            ConnectionNodeToEndpoint => $"node output {connection.FromPin + 1} -> CH {connection.ToChannel + 1}",
+            ConnectionNodeToNode => $"node output {connection.FromPin + 1} -> node input {connection.ToPin + 1}",
+            _ => "Cable"
+        };
+    }
+
     private EndpointPinMode EndpointPinModeFor(CallbackMode mode, IoEndpoint endpoint)
     {
         return _settingsByEndpoint.TryGetValue(endpoint.Key(mode), out var settings)
@@ -1732,13 +1715,27 @@ public partial class MainWindow : Window
 
     private string EndpointPinModeLabel(CallbackMode mode, IoEndpoint endpoint)
     {
-        return EndpointPinModeFor(mode, endpoint) == EndpointPinMode.Full
+        return CanChangeEndpointPinMode(endpoint) && EndpointPinModeFor(mode, endpoint) == EndpointPinMode.Full
             ? $"Full {endpoint.ChannelCount}"
             : "Stereo";
     }
 
+    private string EndpointPinModeLabel(CallbackMode mode, IoEndpoint endpoint, int visiblePinCount)
+    {
+        var label = EndpointPinModeLabel(mode, endpoint);
+        var stereoPinCount = Math.Min(2, endpoint.ChannelCount);
+        return label == "Stereo" && visiblePinCount > stereoPinCount
+            ? $"Stereo + routed {visiblePinCount}"
+            : label;
+    }
+
     private void SetEndpointPinMode(CallbackMode mode, IoEndpoint endpoint, EndpointPinMode pinMode)
     {
+        if (!CanChangeEndpointPinMode(endpoint))
+        {
+            pinMode = EndpointPinMode.Stereo;
+        }
+
         if (IsInputPatchBypassEndpoint(mode, endpoint, out var explanation))
         {
             AppendLog(explanation);
@@ -1756,6 +1753,11 @@ public partial class MainWindow : Window
         AppendLog($"{endpoint.DisplayName}: VST canvas pins set to {EndpointPinModeLabel(mode, endpoint)}.");
         RebuildRoutingCanvas();
         QueueSave();
+    }
+
+    private static bool CanChangeEndpointPinMode(IoEndpoint endpoint)
+    {
+        return endpoint.ChannelCount > 2;
     }
 
     private string? EndpointRouteHueKey(string endpointKey)
@@ -1929,13 +1931,6 @@ public partial class MainWindow : Window
         var isStripEnabled = isSendStrip
             ? routeDestination is not null && settings.RouteEnabled[offset]
             : settings.Enabled[offset];
-        var mainInputDelayUnavailable = !isSendStrip &&
-                                        settings.Mode == CallbackMode.Input &&
-                                        IsEndpointHandledByInsertAsio(settings.Endpoint);
-        var delayControlsEnabled = !mainInputDelayUnavailable && (!isSendStrip || routeDestination is not null);
-        var delayControlToolTip = mainInputDelayUnavailable
-            ? "Main input delay is unavailable while this input is owned by Insert ASIO. Use the per-output send delay or a delay VST instead."
-            : null;
 
         var border = new Border
         {
@@ -2033,20 +2028,16 @@ public partial class MainWindow : Window
         {
             Text = "Delay",
             FontSize = 11,
-            Foreground = mainInputDelayUnavailable
-                ? (Brush)FindResource("MutedBrush")
-                : (Brush)FindResource("DelayAccentBrush"),
+            Foreground = (Brush)FindResource("DelayAccentBrush"),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, 4),
-            ToolTip = delayControlToolTip
+            Margin = new Thickness(0, 0, 0, 4)
         });
 
         var delaySliderHost = new Grid
         {
             Width = 44,
             Height = 128,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            ToolTip = delayControlToolTip
+            HorizontalAlignment = HorizontalAlignment.Center
         };
         delaySliderHost.Children.Add(new Border
         {
@@ -2054,11 +2045,8 @@ public partial class MainWindow : Window
             Height = 128,
             HorizontalAlignment = HorizontalAlignment.Center,
             Background = (Brush)FindResource("FieldBrush"),
-            BorderBrush = mainInputDelayUnavailable
-                ? (Brush)FindResource("SubtleBorderBrush")
-                : (Brush)FindResource("DelayAccentBrush"),
-            BorderThickness = new Thickness(1),
-            Opacity = mainInputDelayUnavailable ? 0.55 : 1.0
+            BorderBrush = (Brush)FindResource("DelayAccentBrush"),
+            BorderThickness = new Thickness(1)
         });
         var delaySlider = new Slider
         {
@@ -2068,7 +2056,7 @@ public partial class MainWindow : Window
             Value = isSendStrip ? routeDestination?.DelayMilliseconds ?? 0.0 : settings.DelayMilliseconds[offset],
             Width = 34,
             Height = 128,
-            IsEnabled = delayControlsEnabled,
+            IsEnabled = !isSendStrip || routeDestination is not null,
             Foreground = (Brush)FindResource("DelayAccentBrush"),
             BorderBrush = (Brush)FindResource("VbanAccentBrush"),
             Background = Brushes.Transparent,
@@ -2076,9 +2064,7 @@ public partial class MainWindow : Window
             TickFrequency = 10,
             IsSnapToTickEnabled = false,
             SmallChange = 1,
-            LargeChange = 10,
-            Opacity = mainInputDelayUnavailable ? 0.45 : 1.0,
-            ToolTip = delayControlToolTip
+            LargeChange = 10
         };
         var delayText = new TextBox
         {
@@ -2087,21 +2073,13 @@ public partial class MainWindow : Window
                 : $"{settings.DelayMilliseconds[offset]:0}",
             Width = 54,
             MinHeight = 28,
-            IsEnabled = delayControlsEnabled,
+            IsEnabled = !isSendStrip || routeDestination is not null,
             HorizontalContentAlignment = HorizontalAlignment.Center,
             Margin = new Thickness(0, 6, 0, 0),
-            BorderBrush = mainInputDelayUnavailable
-                ? (Brush)FindResource("SubtleBorderBrush")
-                : (Brush)FindResource("DelayAccentBrush"),
-            ToolTip = delayControlToolTip
+            BorderBrush = (Brush)FindResource("DelayAccentBrush")
         };
         delaySlider.ValueChanged += (_, _) =>
         {
-            if (!delayControlsEnabled)
-            {
-                return;
-            }
-
             var rounded = Math.Round(delaySlider.Value);
             if (isSendStrip)
             {
@@ -2148,12 +2126,9 @@ public partial class MainWindow : Window
         {
             Text = "ms",
             FontSize = 11,
-            Foreground = mainInputDelayUnavailable
-                ? (Brush)FindResource("MutedBrush")
-                : (Brush)FindResource("DelayAccentBrush"),
+            Foreground = (Brush)FindResource("DelayAccentBrush"),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 2, 0, 0),
-            ToolTip = delayControlToolTip
+            Margin = new Thickness(0, 2, 0, 0)
         });
 
         var volumeStack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
@@ -2500,17 +2475,23 @@ public partial class MainWindow : Window
         {
             var expanded = _expandedCrossRouteBusIndex == index;
             DrawCrossRouteDestinationCard(buses[index], index, x: 730, y, expanded);
-            y += expanded ? 198 : 88;
+            y += CrossRouteDestinationCardHeight(buses[index], index, expanded) + 14;
         }
 
-        var canvasHeight = Math.Max(560, y + 32);
+        var destinationStackHeight = Math.Max(560, y + 32);
         var sourceHeight = CrossRouteSourceCardHeight(settings.Endpoint.ChannelCount);
-        var sourceY = Math.Max(38, (canvasHeight - sourceHeight) * 0.5);
+        var sourceY = Math.Max(38, (destinationStackHeight - sourceHeight) * 0.5);
+        var canvasHeight = Math.Max(
+            destinationStackHeight,
+            Math.Max(y, sourceY + sourceHeight) + CrossRouteBottomPadding());
         DrawCrossRouteSourceCard(settings, x: 28, sourceY);
         DrawCrossRouteConnections(settings);
         CrossRouteCanvas.Width = 980;
         CrossRouteCanvas.Height = canvasHeight;
     }
+
+    private double CrossRouteBottomPadding() =>
+        _expandedCrossRouteBusIndex >= 0 ? 180.0 : 72.0;
 
     private void DrawCrossRouteEmptyState(string text)
     {
@@ -2573,11 +2554,11 @@ public partial class MainWindow : Window
         });
         var postInsertSend = new CheckBox
         {
-            Content = "Main callback send for ASIO buses",
+            Content = "Main callback send",
             IsChecked = settings.PostInsertSend,
             Foreground = (Brush)FindResource("RouteAccentBrush"),
             Margin = new Thickness(0, 10, 0, 0),
-            ToolTip = "Use this for ASIO/Patch Insert sources when sending this input to A/B buses from the channel routing canvas."
+            ToolTip = "Experimental console-style route. Leave this off to test the normal Input+Output callback route suggested for ASIO insert checks."
         };
         postInsertSend.Checked += (_, _) => SetEndpointPostInsertSend(settings, true);
         postInsertSend.Unchecked += (_, _) => SetEndpointPostInsertSend(settings, false);
@@ -2620,8 +2601,8 @@ public partial class MainWindow : Window
     private void DrawCrossRouteDestinationCard(IoEndpoint bus, int busIndex, double x, double y, bool expanded)
     {
         var selected = _selectedCrossRouteBusIndex == busIndex;
-        var pinCount = expanded ? bus.ChannelCount : Math.Min(2, bus.ChannelCount);
-        var height = Math.Max(74.0, 50.0 + (pinCount * 18.0));
+        var pinCount = VisibleCrossRouteDestinationPinCount(bus, busIndex, expanded);
+        var height = CrossRouteDestinationCardHeight(pinCount);
         var border = new Border
         {
             Width = 220,
@@ -2656,7 +2637,9 @@ public partial class MainWindow : Window
         });
         stack.Children.Add(new TextBlock
         {
-            Text = expanded ? "Full output" : "Stereo",
+            Text = expanded
+                ? "Full output"
+                : pinCount > Math.Min(2, bus.ChannelCount) ? "Stereo + routed pins" : "Stereo",
             Style = (Style)FindResource("MutedText"),
             FontSize = 11,
             Margin = new Thickness(0, 3, 0, 0)
@@ -2679,6 +2662,40 @@ public partial class MainWindow : Window
             AddCrossRouteLabel(CrossRoutePinLabel(offset), point.X + 14, point.Y - 8, alignRight: false);
         }
     }
+
+    private int VisibleCrossRouteDestinationPinCount(IoEndpoint bus, int busIndex, bool expanded)
+    {
+        if (expanded)
+        {
+            return bus.ChannelCount;
+        }
+
+        var pinCount = Math.Min(2, bus.ChannelCount);
+        if (_selectedChannelSettings is not { Mode: CallbackMode.Input } settings)
+        {
+            return pinCount;
+        }
+
+        var highestRoutedOffset = settings.RouteDestinations
+            .SelectMany(static destinations => destinations)
+            .Where(destination => destination.BusIndex == busIndex)
+            .Select(destination => destination.ChannelOffset)
+            .DefaultIfEmpty(pinCount - 1)
+            .Max();
+        var highestVstOffset = VstGraphRoutesForEndpoint(settings.Endpoint)
+            .Where(route => route.BusIndex == busIndex)
+            .Select(route => route.DestinationOffset)
+            .DefaultIfEmpty(pinCount - 1)
+            .Max();
+
+        return Math.Clamp(Math.Max(highestRoutedOffset, highestVstOffset) + 1, pinCount, bus.ChannelCount);
+    }
+
+    private double CrossRouteDestinationCardHeight(IoEndpoint bus, int busIndex, bool expanded) =>
+        CrossRouteDestinationCardHeight(VisibleCrossRouteDestinationPinCount(bus, busIndex, expanded));
+
+    private static double CrossRouteDestinationCardHeight(int pinCount) =>
+        Math.Max(74.0, 50.0 + (pinCount * 18.0));
 
     private void AddCrossRoutePin(CrossRoutePinInfo pinInfo, Brush stroke)
     {
@@ -2719,6 +2736,7 @@ public partial class MainWindow : Window
 
     private void DrawCrossRouteConnections(EndpointChannelSettings settings)
     {
+        var buses = VoicemeeterIoLayout.GetEndpoints(CallbackMode.Output, _kind);
         for (var offset = 0; offset < settings.Endpoint.ChannelCount; offset++)
         {
             if (!settings.RouteEnabled[offset] ||
@@ -2729,14 +2747,87 @@ public partial class MainWindow : Window
 
             foreach (var destination in settings.RouteDestinations[offset])
             {
+                if (destination.BusIndex < 0 || destination.BusIndex >= buses.Count)
+                {
+                    continue;
+                }
+
                 if (!_crossRoutePinPositions.TryGetValue(CrossRouteDestinationKey(destination.BusIndex, destination.ChannelOffset), out var end))
                 {
                     continue;
                 }
 
-                CrossRouteCanvas.Children.Insert(0, CreateWirePath(start, end, preview: false));
+                var label = $"{settings.Endpoint.Name} {CrossRoutePinLabel(offset)} -> " +
+                            $"{buses[destination.BusIndex].Name} {CrossRoutePinLabel(destination.ChannelOffset)}";
+                var info = new CrossRouteConnectionInfo(offset, destination.BusIndex, destination.ChannelOffset, label);
+                var key = CrossRouteConnectionKey(info);
+                var sourceChannel = settings.Endpoint.Range.Start + offset;
+                var destinationChannel = buses[destination.BusIndex].Range.Start + destination.ChannelOffset;
+                var hasVstGraph = HasVstGraphRoute(sourceChannel, destinationChannel);
+                var path = CreateWirePath(start, end, preview: false, selected: key == _selectedCrossRouteConnectionKey);
+                path.Tag = info;
+                path.ToolTip = hasVstGraph
+                    ? "Click to select. Press Delete to disconnect. A VST route also exists for this source and destination."
+                    : "Click to select. Press Delete to disconnect.";
+                path.MouseLeftButtonDown += CrossRouteConnection_MouseLeftButtonDown;
+                CrossRouteCanvas.Children.Insert(0, path);
+                if (hasVstGraph)
+                {
+                    AddWireBadge(CrossRouteCanvas, start, end, "VST", (Brush)FindResource("VolumeAccentBrush"));
+                }
             }
         }
+
+        DrawCrossRouteVstGraphRoutes(settings, buses);
+    }
+
+    private void DrawCrossRouteVstGraphRoutes(EndpointChannelSettings settings, IReadOnlyList<IoEndpoint> buses)
+    {
+        foreach (var route in VstGraphRoutesForEndpoint(settings.Endpoint))
+        {
+            if (route.BusIndex < 0 || route.BusIndex >= buses.Count)
+            {
+                continue;
+            }
+
+            var hasChannelRoute = route.SourceOffset >= 0 &&
+                                  route.SourceOffset < settings.RouteDestinations.Length &&
+                                  settings.RouteEnabled[route.SourceOffset] &&
+                                  settings.RouteDestinations[route.SourceOffset].Any(destination =>
+                                      destination.BusIndex == route.BusIndex &&
+                                      destination.ChannelOffset == route.DestinationOffset);
+            if (hasChannelRoute)
+            {
+                continue;
+            }
+
+            if (!_crossRoutePinPositions.TryGetValue(CrossRouteSourceKey(route.SourceOffset), out var start) ||
+                !_crossRoutePinPositions.TryGetValue(CrossRouteDestinationKey(route.BusIndex, route.DestinationOffset), out var end))
+            {
+                continue;
+            }
+
+            var path = CreateWirePath(start, end, preview: false, stroke: (Brush)FindResource("VolumeAccentBrush"));
+            path.StrokeDashArray = new DoubleCollection { 5, 5 };
+            path.Opacity = 0.62;
+            path.IsHitTestVisible = false;
+            CrossRouteCanvas.Children.Insert(0, path);
+            AddWireBadge(CrossRouteCanvas, start, end, "VST", (Brush)FindResource("VolumeAccentBrush"));
+        }
+    }
+
+    private void CrossRouteConnection_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: CrossRouteConnectionInfo info })
+        {
+            return;
+        }
+
+        _selectedCrossRouteConnectionKey = CrossRouteConnectionKey(info);
+        _selectedCanvasConnectionKey = null;
+        _selectedDirectChannelRouteKey = null;
+        RebuildCrossRouteCanvas();
+        e.Handled = true;
     }
 
     private void CrossRoutePin_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -2810,6 +2901,154 @@ public partial class MainWindow : Window
         RefreshEndpointButtonSelection();
         BuildCrossRoutingPanel();
         QueueSave();
+    }
+
+    private void ToggleSharedDirectChannelRoute(int sourceChannel, int destinationChannel, string label)
+    {
+        if (!TryResolveDirectChannelRoute(sourceChannel, destinationChannel, out var settings, out var sourceOffset, out var busIndex, out var destinationOffset))
+        {
+            AppendLog("Direct input-to-output route could not be mapped to a channel route.");
+            return;
+        }
+
+        var destinations = settings.RouteDestinations[sourceOffset];
+        var existing = destinations.FirstOrDefault(candidate =>
+            candidate.BusIndex == busIndex &&
+            candidate.ChannelOffset == destinationOffset);
+
+        if (existing is not null)
+        {
+            destinations.Remove(existing);
+            settings.RouteEnabled[sourceOffset] = destinations.Count > 0;
+            _selectedDirectChannelRouteKey = null;
+            AppendLog($"Disconnected shared direct route {label}.");
+        }
+        else
+        {
+            AddSharedDirectChannelRoute(settings, sourceOffset, busIndex, destinationOffset);
+            _selectedDirectChannelRouteKey = DirectChannelRouteKey(sourceChannel, destinationChannel);
+            AppendLog($"Connected shared direct route {label}.");
+        }
+
+        ApplyEngineState();
+        RefreshEndpointButtonSelection();
+        BuildChannelStrips();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private bool AddSharedDirectChannelRoute(int sourceChannel, int destinationChannel)
+    {
+        return TryResolveDirectChannelRoute(sourceChannel, destinationChannel, out var settings, out var sourceOffset, out var busIndex, out var destinationOffset) &&
+               AddSharedDirectChannelRoute(settings, sourceOffset, busIndex, destinationOffset);
+    }
+
+    private static bool AddSharedDirectChannelRoute(EndpointChannelSettings settings, int sourceOffset, int busIndex, int destinationOffset)
+    {
+        if (sourceOffset < 0 || sourceOffset >= settings.RouteDestinations.Length)
+        {
+            return false;
+        }
+
+        var destinations = settings.RouteDestinations[sourceOffset];
+        if (destinations.Any(destination => destination.BusIndex == busIndex && destination.ChannelOffset == destinationOffset))
+        {
+            settings.RouteEnabled[sourceOffset] = true;
+            return false;
+        }
+
+        if (!settings.RouteEnabled[sourceOffset])
+        {
+            destinations.Clear();
+        }
+
+        destinations.Add(new RouteDestinationSnapshot
+        {
+            BusIndex = busIndex,
+            ChannelOffset = destinationOffset
+        });
+        settings.RouteEnabled[sourceOffset] = true;
+        return true;
+    }
+
+    private bool RemoveSharedDirectChannelRoute(DirectChannelRouteInfo route)
+    {
+        if (!TryResolveDirectChannelRoute(route.SourceChannel, route.DestinationChannel, out var settings, out var sourceOffset, out var busIndex, out var destinationOffset))
+        {
+            _selectedDirectChannelRouteKey = null;
+            return false;
+        }
+
+        var destinations = settings.RouteDestinations[sourceOffset];
+        var existing = destinations.FirstOrDefault(candidate =>
+            candidate.BusIndex == busIndex &&
+            candidate.ChannelOffset == destinationOffset);
+        if (existing is null)
+        {
+            _selectedDirectChannelRouteKey = null;
+            return false;
+        }
+
+        destinations.Remove(existing);
+        settings.RouteEnabled[sourceOffset] = destinations.Count > 0;
+        _selectedDirectChannelRouteKey = null;
+        AppendLog($"Disconnected shared direct route {route.Label}.");
+        ApplyEngineState();
+        RefreshEndpointButtonSelection();
+        BuildChannelStrips();
+        RebuildRoutingCanvas();
+        QueueSave();
+        return true;
+    }
+
+    private bool TryResolveDirectChannelRoute(
+        int sourceChannel,
+        int destinationChannel,
+        out EndpointChannelSettings settings,
+        out int sourceOffset,
+        out int busIndex,
+        out int destinationOffset)
+    {
+        settings = null!;
+        sourceOffset = -1;
+        busIndex = -1;
+        destinationOffset = -1;
+
+        var sourceEndpoint = EndpointForChannel(CallbackMode.Input, sourceChannel);
+        var destinationEndpoint = EndpointForChannel(CallbackMode.Output, destinationChannel);
+        if (sourceEndpoint is null || destinationEndpoint is null)
+        {
+            return false;
+        }
+
+        var buses = VoicemeeterIoLayout.GetEndpoints(CallbackMode.Output, _kind);
+        for (var index = 0; index < buses.Count; index++)
+        {
+            if (buses[index].Range.Start == destinationEndpoint.Range.Start &&
+                buses[index].Range.End == destinationEndpoint.Range.End)
+            {
+                busIndex = index;
+                break;
+            }
+        }
+
+        if (busIndex < 0)
+        {
+            return false;
+        }
+
+        sourceOffset = sourceChannel - sourceEndpoint.Range.Start;
+        destinationOffset = destinationChannel - destinationEndpoint.Range.Start;
+        if (sourceOffset < 0 ||
+            sourceOffset >= sourceEndpoint.ChannelCount ||
+            destinationOffset < 0 ||
+            destinationOffset >= destinationEndpoint.ChannelCount)
+        {
+            return false;
+        }
+
+        settings = GetOrCreateChannelSettings(CallbackMode.Input, sourceEndpoint);
+        return true;
     }
 
     private void SetEndpointMuteStandardRouting(EndpointChannelSettings settings, bool enabled)
@@ -3115,7 +3354,7 @@ public partial class MainWindow : Window
 
         var node = _engine.AddPluginNode(
             choice,
-            _selectedMode,
+            CurrentVstCanvasNodeMode(),
             mainInputPins: 2,
             sidechainInputPins: 0,
             outputPins: 2,
@@ -3262,6 +3501,7 @@ public partial class MainWindow : Window
         DrawCanvasCards();
         DrawPluginNodes();
         DrawDefaultPassthroughConnections();
+        DrawMirroredChannelRoutes();
         DrawCanvasConnections();
         UpdateRouteSummary();
         RebuildVstNodeList();
@@ -3269,11 +3509,13 @@ public partial class MainWindow : Window
 
     private void DrawCanvasCards()
     {
-        RoutingCanvasTitleTextBlock.Text = _selectedMode switch
+        RoutingCanvasTitleTextBlock.Text = _vstCanvasMode switch
         {
             CallbackMode.Output => "Output VST Canvas",
             CallbackMode.Main => "Main Routing Canvas",
-            _ => "Input VST Canvas"
+            _ => IsInputDirectOutputVstView()
+                ? "Input -> Output VST Canvas"
+                : "Input -> Input VST Canvas"
         };
 
         var leftMode = CanvasEndpointMode(outputSide: false);
@@ -3284,17 +3526,17 @@ public partial class MainWindow : Window
         var y = 42.0;
         foreach (var endpoint in leftEndpoints)
         {
-            var pinCount = CanvasPinCount(leftMode, endpoint);
+            var pinCount = CanvasPinCount(leftMode, endpoint, outputSide: false);
             DrawEndpointCard(endpoint, leftMode, x: VstCanvasWallMargin, y, outputSide: false, pinCount);
-            y += pinCount <= 2 ? 92 : 176;
+            y += VstEndpointCardSpacing(pinCount);
         }
 
         y = 42.0;
         foreach (var endpoint in rightEndpoints)
         {
-            var pinCount = CanvasPinCount(rightMode, endpoint);
+            var pinCount = CanvasPinCount(rightMode, endpoint, outputSide: true);
             DrawEndpointCard(endpoint, rightMode, rightX, y, outputSide: true, pinCount);
-            y += pinCount <= 2 ? 92 : 176;
+            y += VstEndpointCardSpacing(pinCount);
         }
     }
 
@@ -3306,41 +3548,189 @@ public partial class MainWindow : Window
             : VstCanvasMinWidth;
 
         RoutingCanvas.Width = width;
-        RoutingCanvas.Height = Math.Max(VstCanvasMinHeight, RoutingCanvas.Height);
+        RoutingCanvas.Height = CalculateVstCanvasHeight();
     }
+
+    private double CalculateVstCanvasHeight()
+    {
+        var leftMode = CanvasEndpointMode(outputSide: false);
+        var rightMode = CanvasEndpointMode(outputSide: true);
+        var endpointBottom = Math.Max(
+            VstEndpointStackBottom(leftMode, outputSide: false),
+            VstEndpointStackBottom(rightMode, outputSide: true));
+        var nodeBottom = _settings.PluginNodes
+            .Where(NodeBelongsToCurrentCanvas)
+            .Select(static node => node.Y + VstNodeHeight(node) + 96.0)
+            .DefaultIfEmpty(0.0)
+            .Max();
+
+        return Math.Max(VstCanvasMinHeight, Math.Max(endpointBottom, nodeBottom) + 160.0);
+    }
+
+    private double VstEndpointStackBottom(CallbackMode mode, bool outputSide)
+    {
+        var y = 42.0;
+        var bottom = y;
+        foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(mode, _kind))
+        {
+            var pinCount = CanvasPinCount(mode, endpoint, outputSide);
+            var endpointY = y + EndpointCanvasYOffset(endpoint.Key(mode));
+            bottom = Math.Max(bottom, endpointY + VstEndpointCardHeight(mode, endpoint, pinCount));
+            y += VstEndpointCardSpacing(pinCount);
+        }
+
+        return bottom;
+    }
+
+    private double VstEndpointCardHeight(CallbackMode mode, IoEndpoint endpoint, int pinCount)
+    {
+        return IsInputPatchBypassEndpoint(mode, endpoint, out _)
+            ? 88.0
+            : VstEndpointCardHeightForPinCount(pinCount);
+    }
+
+    private static double VstEndpointCardHeightForPinCount(int pinCount) =>
+        pinCount <= 2 ? 74.0 : 68.0 + ((pinCount - 1) * 13.0);
+
+    private static double VstEndpointCardSpacing(int pinCount) =>
+        VstEndpointCardHeightForPinCount(pinCount) + 18.0;
 
     private CallbackMode CanvasEndpointMode(bool outputSide)
     {
-        if (_selectedMode == CallbackMode.Output)
+        if (_vstCanvasMode == CallbackMode.Output)
         {
             return CallbackMode.Output;
         }
 
-        if (_selectedMode == CallbackMode.Main)
+        if (_vstCanvasMode == CallbackMode.Main)
         {
             return outputSide ? CallbackMode.Output : CallbackMode.Input;
+        }
+
+        if (outputSide && IsInputDirectOutputVstView())
+        {
+            return CallbackMode.Output;
         }
 
         return CallbackMode.Input;
     }
 
-    private int CanvasPinCount(CallbackMode mode, IoEndpoint endpoint)
+    private bool IsInputDirectOutputVstView()
+    {
+        return _workspaceView == WorkspaceView.Vst &&
+               _vstCanvasMode == CallbackMode.Input &&
+               _vstInputCanvasRouteView == VstInputCanvasRouteView.DirectOutput;
+    }
+
+    private CallbackMode CurrentVstCanvasNodeMode()
+    {
+        return IsInputDirectOutputVstView()
+            ? CallbackMode.Main
+            : _vstCanvasMode;
+    }
+
+    private int CanvasPinCount(CallbackMode mode, IoEndpoint endpoint, bool outputSide)
     {
         var key = endpoint.Key(mode);
-        return _settingsByEndpoint.TryGetValue(key, out var settings)
+        var configuredPinCount = _settingsByEndpoint.TryGetValue(key, out var settings)
             ? settings.CanvasPinCount
             : Math.Min(2, endpoint.ChannelCount);
+        var requiredPinCount = RequiredCanvasPinCountForRoutes(mode, endpoint, outputSide);
+
+        return Math.Clamp(
+            Math.Max(configuredPinCount, requiredPinCount),
+            Math.Min(2, endpoint.ChannelCount),
+            endpoint.ChannelCount);
     }
+
+    private int RequiredCanvasPinCountForRoutes(CallbackMode mode, IoEndpoint endpoint, bool outputSide)
+    {
+        var required = Math.Min(2, endpoint.ChannelCount);
+        void IncludeChannel(int channel)
+        {
+            if (channel >= endpoint.Range.Start && channel <= endpoint.Range.End)
+            {
+                required = Math.Max(required, channel - endpoint.Range.Start + 1);
+            }
+        }
+
+        foreach (var connection in _settings.CanvasConnections)
+        {
+            if (!CanvasConnectionBelongsToCurrentView(connection))
+            {
+                continue;
+            }
+
+            if (!outputSide &&
+                connection.FromKind == PinEndpointSource &&
+                connection.FromMode == mode)
+            {
+                IncludeChannel(connection.FromChannel);
+            }
+
+            if (outputSide &&
+                connection.ToKind == PinEndpointDestination &&
+                connection.ToMode == mode)
+            {
+                IncludeChannel(connection.ToChannel);
+            }
+        }
+
+        if (IsInputDirectOutputVstView())
+        {
+            foreach (var route in AllDirectRoutes())
+            {
+                if (!outputSide && mode == CallbackMode.Input)
+                {
+                    IncludeChannel(route.SourceChannel);
+                }
+
+                if (outputSide && mode == CallbackMode.Output)
+                {
+                    IncludeChannel(route.DestinationChannel);
+                }
+            }
+        }
+
+        return required;
+    }
+
+    private bool CanvasConnectionBelongsToCurrentView(CanvasConnectionSnapshot connection)
+    {
+        return connection.Kind switch
+        {
+            ConnectionEndpointToEndpoint =>
+                EndpointIsVisibleOnCurrentCanvas(connection.FromMode, outputSide: false) &&
+                EndpointIsVisibleOnCurrentCanvas(connection.ToMode, outputSide: true),
+            ConnectionEndpointToNode =>
+                EndpointIsVisibleOnCurrentCanvas(connection.FromMode, outputSide: false) &&
+                _settings.PluginNodes.Any(node => node.Slot == connection.ToSlot && NodeBelongsToCurrentCanvas(node)),
+            ConnectionNodeToEndpoint =>
+                EndpointIsVisibleOnCurrentCanvas(connection.ToMode, outputSide: true) &&
+                _settings.PluginNodes.Any(node => node.Slot == connection.FromSlot && NodeBelongsToCurrentCanvas(node)),
+            ConnectionNodeToNode =>
+                _settings.PluginNodes.Any(node => node.Slot == connection.FromSlot && NodeBelongsToCurrentCanvas(node)) &&
+                _settings.PluginNodes.Any(node => node.Slot == connection.ToSlot && NodeBelongsToCurrentCanvas(node)),
+            _ => false
+        };
+    }
+
+    private bool EndpointIsVisibleOnCurrentCanvas(CallbackMode mode, bool outputSide) =>
+        CanvasEndpointMode(outputSide) == mode;
     private void DrawEndpointCard(IoEndpoint endpoint, CallbackMode mode, double x, double y, bool outputSide, int pinCount)
     {
         var patchBypassed = IsInputPatchBypassEndpoint(mode, endpoint, out var patchExplanation);
-        var height = patchBypassed ? 88.0 : pinCount <= 2 ? 74.0 : 154.0;
+        var height = VstEndpointCardHeight(mode, endpoint, pinCount);
         var endpointMenu = BuildEndpointContextMenu(mode, endpoint);
         var endpointKey = endpoint.Key(mode);
         var hueStroke = EndpointHueStrokeBrush(endpointKey);
         var hueFill = EndpointHueFillBrush(endpointKey);
         y += EndpointCanvasYOffset(endpointKey);
-        _endpointVisualElements[endpointKey] = [];
+        if (!_endpointVisualElements.TryGetValue(endpointKey, out var endpointElements))
+        {
+            endpointElements = [];
+            _endpointVisualElements[endpointKey] = endpointElements;
+        }
         var border = new Border
         {
             Width = VstEndpointCardWidth,
@@ -3364,7 +3754,7 @@ public partial class MainWindow : Window
         border.MouseMove += EndpointCard_MouseMove;
         border.MouseLeftButtonUp += EndpointCard_MouseLeftButtonUp;
         RoutingCanvas.Children.Add(border);
-        _endpointVisualElements[endpointKey].Add(border);
+        endpointElements.Add(border);
 
         var textLeft = outputSide ? 32 : 10;
         var textRight = outputSide ? 10 : 32;
@@ -3377,7 +3767,7 @@ public partial class MainWindow : Window
         });
         endpointStack.Children.Add(new TextBlock
         {
-            Text = patchBypassed ? "Bus only" : EndpointPinModeLabel(mode, endpoint),
+            Text = patchBypassed ? "Bus only" : EndpointPinModeLabel(mode, endpoint, pinCount),
             Style = (Style)FindResource("MutedText"),
             FontSize = 11,
             Margin = new Thickness(textLeft, 2, textRight, 0)
@@ -3420,25 +3810,25 @@ public partial class MainWindow : Window
                 StrokeThickness = 1.5,
                 Cursor = Cursors.Hand,
                 Tag = pinInfo,
-                ContextMenu = BuildEndpointContextMenu(mode, endpoint)
+                ContextMenu = BuildCanvasPinContextMenu(pinInfo, BuildEndpointContextMenu(mode, endpoint))
             };
             AttachPinHandlers(pin);
             Canvas.SetLeft(pin, pinX - 5);
             Canvas.SetTop(pin, pinY - 5);
             RoutingCanvas.Children.Add(pin);
-            _endpointVisualElements[endpointKey].Add(pin);
+            endpointElements.Add(pin);
 
             var label = new TextBlock
             {
                 Text = EndpointPinLabel(pinCount, offset),
                 FontSize = 11,
                 Foreground = hueStroke ?? (Brush)FindResource("MutedTextBrush"),
-                ContextMenu = BuildEndpointContextMenu(mode, endpoint)
+                ContextMenu = BuildCanvasPinContextMenu(pinInfo, BuildEndpointContextMenu(mode, endpoint))
             };
             Canvas.SetLeft(label, outputSide ? x + 28 : x + 118);
             Canvas.SetTop(label, pinY - 8);
             RoutingCanvas.Children.Add(label);
-            _endpointVisualElements[endpointKey].Add(label);
+            endpointElements.Add(label);
         }
     }
 
@@ -3457,8 +3847,7 @@ public partial class MainWindow : Window
         {
             _nodeVisualElements[node.Slot] = [];
             var selected = _selectedPluginNodeSlot == node.Slot;
-            var pinRows = Math.Max(node.InputPins, node.OutputPins);
-            var nodeHeight = Math.Max(96.0, 62.0 + (pinRows * 18.0));
+            var nodeHeight = VstNodeHeight(node);
             var border = new Border
             {
                 Width = VstNodeWidth,
@@ -3802,7 +4191,7 @@ public partial class MainWindow : Window
 
     private bool NodeBelongsToCurrentCanvas(PluginNodeSnapshot node)
     {
-        return node.Mode == _selectedMode;
+        return node.Mode == CurrentVstCanvasNodeMode();
     }
 
     private static int NodeInputVisualPinCount(PluginNodeSnapshot node)
@@ -3839,7 +4228,8 @@ public partial class MainWindow : Window
                 : nodeHueStroke ?? (Brush)FindResource("RouteAccentBrush"),
             StrokeThickness = 2,
             Cursor = Cursors.Hand,
-            Tag = pinInfo
+            Tag = pinInfo,
+            ContextMenu = BuildCanvasPinContextMenu(pinInfo, BuildNodeContextMenu(node))
         };
         AttachPinHandlers(pin);
         Canvas.SetLeft(pin, x - 6);
@@ -4051,6 +4441,14 @@ public partial class MainWindow : Window
 
     private void ToggleEndpointToEndpointConnection(CanvasPinInfo source, CanvasPinInfo target)
     {
+        if (IsInputDirectOutputVstView() &&
+            source.Mode == CallbackMode.Input &&
+            target.Mode == CallbackMode.Output)
+        {
+            ToggleSharedDirectChannelRoute(source.Channel, target.Channel, $"{source.Label} -> {target.Label}");
+            return;
+        }
+
         var routeMode = EndpointToEndpointRouteMode(source.Mode, target.Mode);
         if (routeMode == CallbackMode.None)
         {
@@ -4402,14 +4800,14 @@ public partial class MainWindow : Window
         return keys;
     }
 
-    private HashSet<string> SourceInputEndpointKeysForNode(int slot, HashSet<int> visitedSlots)
+    private HashSet<(CallbackMode Mode, int Channel)> SourceChannelsForNode(int slot, HashSet<int> visitedSlots)
     {
         if (!visitedSlots.Add(slot))
         {
             return [];
         }
 
-        var keys = new HashSet<string>();
+        var channels = new HashSet<(CallbackMode Mode, int Channel)>();
         var targetNode = _settings.PluginNodes.FirstOrDefault(node => node.Slot == slot);
         foreach (var connection in _settings.CanvasConnections)
         {
@@ -4420,15 +4818,9 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                if (connection.FromMode != CallbackMode.Input)
+                if (connection.FromChannel >= 0)
                 {
-                    continue;
-                }
-
-                var endpoint = EndpointForChannel(connection.FromMode, connection.FromChannel);
-                if (endpoint is not null)
-                {
-                    keys.Add(endpoint.Key(connection.FromMode));
+                    channels.Add((connection.FromMode, connection.FromChannel));
                 }
             }
             else if (connection.Kind == ConnectionNodeToNode && connection.ToSlot == slot)
@@ -4438,11 +4830,79 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                keys.UnionWith(SourceInputEndpointKeysForNode(connection.FromSlot, visitedSlots));
+                channels.UnionWith(SourceChannelsForNode(connection.FromSlot, visitedSlots));
             }
         }
 
-        return keys;
+        return channels;
+    }
+
+    private IEnumerable<VstGraphChannelRoute> AllVstGraphChannelRoutes()
+    {
+        var seen = new HashSet<string>();
+        foreach (var connection in _settings.CanvasConnections)
+        {
+            if (connection.Kind != ConnectionNodeToEndpoint ||
+                connection.ToMode != CallbackMode.Output ||
+                connection.ToChannel < 0)
+            {
+                continue;
+            }
+
+            foreach (var source in SourceChannelsForNode(connection.FromSlot, []))
+            {
+                if (source.Mode != CallbackMode.Input || source.Channel < 0)
+                {
+                    continue;
+                }
+
+                var key = $"{source.Channel}|{connection.ToChannel}";
+                if (seen.Add(key))
+                {
+                    yield return new VstGraphChannelRoute(source.Channel, connection.ToChannel);
+                }
+            }
+        }
+    }
+
+    private static double VstNodeHeight(PluginNodeSnapshot node)
+    {
+        var pinRows = Math.Max(node.InputPins, node.OutputPins);
+        return Math.Max(96.0, 62.0 + (pinRows * 18.0));
+    }
+
+    private bool HasVstGraphRoute(int sourceChannel, int destinationChannel)
+    {
+        return AllVstGraphChannelRoutes().Any(route =>
+            route.SourceChannel == sourceChannel &&
+            route.DestinationChannel == destinationChannel);
+    }
+
+    private IEnumerable<(int SourceOffset, int BusIndex, int DestinationOffset)> VstGraphRoutesForEndpoint(IoEndpoint endpoint)
+    {
+        var buses = VoicemeeterIoLayout.GetEndpoints(CallbackMode.Output, _kind);
+        foreach (var route in AllVstGraphChannelRoutes())
+        {
+            if (route.SourceChannel < endpoint.Range.Start || route.SourceChannel > endpoint.Range.End)
+            {
+                continue;
+            }
+
+            for (var busIndex = 0; busIndex < buses.Count; busIndex++)
+            {
+                var bus = buses[busIndex];
+                if (route.DestinationChannel < bus.Range.Start || route.DestinationChannel > bus.Range.End)
+                {
+                    continue;
+                }
+
+                yield return (
+                    route.SourceChannel - endpoint.Range.Start,
+                    busIndex,
+                    route.DestinationChannel - bus.Range.Start);
+                break;
+            }
+        }
     }
 
     private IoEndpoint? EndpointForChannel(CallbackMode mode, int channel)
@@ -4518,6 +4978,14 @@ public partial class MainWindow : Window
                 return node is null || !IsSidechainVisualInputPin(node, connection.ToPin);
             }
 
+            if (connection.Kind == ConnectionEndpointToEndpoint &&
+                connection.FromMode == mode &&
+                connection.ToMode == mode)
+            {
+                return IsSameStereoPair(connection.FromChannel, channel) ||
+                       IsSameStereoPair(connection.ToChannel, channel);
+            }
+
             return connection.Kind == ConnectionNodeToEndpoint &&
                    connection.ToMode == mode &&
                    IsSameStereoPair(connection.ToChannel, channel);
@@ -4540,8 +5008,77 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            RoutingCanvas.Children.Insert(0, CreateWirePath(start, end, preview: false, WireStrokeBrush(ConnectionHueKey(connection))));
+            var key = CanvasConnectionKey(connection);
+            var path = CreateWirePath(
+                start,
+                end,
+                preview: false,
+                WireStrokeBrush(ConnectionHueKey(connection)),
+                selected: key == _selectedCanvasConnectionKey);
+            path.Tag = connection;
+            path.ToolTip = "Click to select. Press Delete to disconnect.";
+            path.MouseLeftButtonDown += CanvasConnection_MouseLeftButtonDown;
+            RoutingCanvas.Children.Insert(0, path);
         }
+    }
+
+    private void DrawMirroredChannelRoutes()
+    {
+        if (!IsInputDirectOutputVstView())
+        {
+            return;
+        }
+
+        foreach (var route in AllDirectRoutes())
+        {
+            if (!_pinPositions.TryGetValue(EndpointSourceKey(CallbackMode.Input, route.SourceChannel), out var start) ||
+                !_pinPositions.TryGetValue(EndpointDestinationKey(CallbackMode.Output, route.DestinationChannel), out var end))
+            {
+                continue;
+            }
+
+            var info = new DirectChannelRouteInfo(route.SourceChannel, route.DestinationChannel, route.Name);
+            var key = DirectChannelRouteKey(info.SourceChannel, info.DestinationChannel);
+            var path = CreateWirePath(
+                start,
+                end,
+                preview: false,
+                WireStrokeBrush(EndpointRouteHueKey(CallbackMode.Input, route.SourceChannel)),
+                selected: key == _selectedDirectChannelRouteKey);
+            path.Tag = info;
+            path.ToolTip = "Shared direct channel route. Click to select. Press Delete to disconnect.";
+            path.MouseLeftButtonDown += DirectChannelRoute_MouseLeftButtonDown;
+            RoutingCanvas.Children.Insert(0, path);
+            AddWireBadge(RoutingCanvas, start, end, "CH", (Brush)FindResource("VolumeAccentBrush"));
+        }
+    }
+
+    private void DirectChannelRoute_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: DirectChannelRouteInfo route })
+        {
+            return;
+        }
+
+        _selectedDirectChannelRouteKey = DirectChannelRouteKey(route.SourceChannel, route.DestinationChannel);
+        _selectedCanvasConnectionKey = null;
+        _selectedCrossRouteConnectionKey = null;
+        RebuildRoutingCanvas();
+        e.Handled = true;
+    }
+
+    private void CanvasConnection_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: CanvasConnectionSnapshot connection })
+        {
+            return;
+        }
+
+        _selectedCanvasConnectionKey = CanvasConnectionKey(connection);
+        _selectedCrossRouteConnectionKey = null;
+        _selectedDirectChannelRouteKey = null;
+        RebuildRoutingCanvas();
+        e.Handled = true;
     }
 
     private string? ConnectionHueKey(CanvasConnectionSnapshot connection)
@@ -4618,19 +5155,41 @@ public partial class MainWindow : Window
         _wireDragStart = null;
     }
 
-    private Path CreateWirePath(Point start, Point end, bool preview, Brush? stroke = null)
+    private Path CreateWirePath(Point start, Point end, bool preview, Brush? stroke = null, bool selected = false)
     {
         return new Path
         {
             Data = CreateWireGeometry(start, end),
             Stroke = stroke ?? (Brush)FindResource("RouteAccentBrush"),
-            StrokeThickness = preview ? 3.0 : 2.4,
-            Opacity = preview ? 0.92 : 0.72,
+            StrokeThickness = preview ? 3.0 : selected ? 4.4 : 2.4,
+            Opacity = preview ? 0.92 : selected ? 0.98 : 0.72,
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
-            IsHitTestVisible = false,
+            IsHitTestVisible = !preview,
             StrokeDashArray = preview ? new DoubleCollection { 6, 4 } : null
         };
+    }
+
+    private void AddWireBadge(Canvas canvas, Point start, Point end, string text, Brush background)
+    {
+        var badge = new Border
+        {
+            Background = background,
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(5, 1, 5, 1),
+            IsHitTestVisible = false,
+            Child = new TextBlock
+            {
+                Text = text,
+                FontSize = 9,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(6, 19, 22))
+            }
+        };
+
+        Canvas.SetLeft(badge, ((start.X + end.X) * 0.5) - 13.0);
+        Canvas.SetTop(badge, ((start.Y + end.Y) * 0.5) - 9.0);
+        canvas.Children.Add(badge);
     }
 
     private Path CreateNormalledWirePath(Point start, Point end, Brush? stroke = null)
@@ -4696,6 +5255,149 @@ public partial class MainWindow : Window
         return pinCount == 2
             ? offset == 0 ? "L" : "R"
             : $"{offset + 1}";
+    }
+
+    private bool DeleteSelectedConnection()
+    {
+        if (_selectedDirectChannelRouteKey is { Length: > 0 } directRouteKey &&
+            TryParseDirectChannelRouteKey(directRouteKey, out var route))
+        {
+            return RemoveSharedDirectChannelRoute(route);
+        }
+
+        _selectedDirectChannelRouteKey = null;
+
+        if (_selectedCanvasConnectionKey is { Length: > 0 } canvasKey)
+        {
+            var connection = _settings.CanvasConnections.FirstOrDefault(candidate => CanvasConnectionKey(candidate) == canvasKey);
+            if (connection is not null)
+            {
+                DisconnectCanvasConnection(connection);
+                return true;
+            }
+
+            _selectedCanvasConnectionKey = null;
+        }
+
+        if (_selectedCrossRouteConnectionKey is { Length: > 0 } crossRouteKey &&
+            TryParseCrossRouteConnectionKey(crossRouteKey, out var info))
+        {
+            return DisconnectCrossRouteConnection(info);
+        }
+
+        _selectedCrossRouteConnectionKey = null;
+        return false;
+    }
+
+    private void DisconnectCanvasConnection(CanvasConnectionSnapshot connection)
+    {
+        switch (connection.Kind)
+        {
+        case ConnectionEndpointToNode:
+            if (_settings.PluginNodes.FirstOrDefault(node => node.Slot == connection.ToSlot) is { } inputNode)
+            {
+                var nativePin = NativeInputPinForVisualPin(inputNode, connection.ToPin);
+                if (nativePin >= 0)
+                {
+                    _engine.TogglePluginInputRoute(connection.ToSlot, connection.FromChannel, nativePin);
+                }
+            }
+            break;
+        case ConnectionNodeToEndpoint:
+            _engine.TogglePluginOutputRoute(connection.FromSlot, connection.FromPin, connection.ToChannel);
+            break;
+        case ConnectionNodeToNode:
+            if (_settings.PluginNodes.FirstOrDefault(node => node.Slot == connection.ToSlot) is { } destinationNode)
+            {
+                var nativePin = NativeInputPinForVisualPin(destinationNode, connection.ToPin);
+                if (nativePin >= 0)
+                {
+                    _engine.TogglePluginModuleRoute(connection.FromSlot, connection.FromPin, connection.ToSlot, nativePin);
+                }
+            }
+            break;
+        }
+
+        _settings.CanvasConnections.Remove(connection);
+        _selectedCanvasConnectionKey = null;
+        AppendLog($"Disconnected {CanvasConnectionLabel(connection)}.");
+        RefreshEngineCallbackMode();
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private bool DisconnectCrossRouteConnection(CrossRouteConnectionInfo info)
+    {
+        if (_selectedChannelSettings is not { Mode: CallbackMode.Input } settings ||
+            info.SourceOffset < 0 ||
+            info.SourceOffset >= settings.Endpoint.ChannelCount)
+        {
+            _selectedCrossRouteConnectionKey = null;
+            return false;
+        }
+
+        var destinations = settings.RouteDestinations[info.SourceOffset];
+        var existing = destinations.FirstOrDefault(destination =>
+            destination.BusIndex == info.BusIndex &&
+            destination.ChannelOffset == info.DestinationOffset);
+        if (existing is null)
+        {
+            _selectedCrossRouteConnectionKey = null;
+            return false;
+        }
+
+        destinations.Remove(existing);
+        settings.RouteEnabled[info.SourceOffset] = destinations.Count > 0;
+        _selectedCrossRouteConnectionKey = null;
+        AppendLog($"Disconnected {info.Label}.");
+        ApplyEngineState();
+        RefreshEndpointButtonSelection();
+        BuildCrossRoutingPanel();
+        RebuildCrossRouteCanvas();
+        QueueSave();
+        return true;
+    }
+
+    private static string CanvasConnectionKey(CanvasConnectionSnapshot connection) =>
+        $"{connection.Kind}|{(int)connection.FromMode}|{connection.FromChannel}|{connection.FromSlot}|{connection.FromPin}|" +
+        $"{(int)connection.ToMode}|{connection.ToChannel}|{connection.ToSlot}|{connection.ToPin}";
+
+    private static string CrossRouteConnectionKey(CrossRouteConnectionInfo info) =>
+        $"{info.SourceOffset}|{info.BusIndex}|{info.DestinationOffset}|{info.Label}";
+
+    private static string DirectChannelRouteKey(int sourceChannel, int destinationChannel) =>
+        $"{sourceChannel}|{destinationChannel}";
+
+    private static bool TryParseDirectChannelRouteKey(string key, out DirectChannelRouteInfo route)
+    {
+        route = new DirectChannelRouteInfo(-1, -1, string.Empty);
+        var parts = key.Split('|', 2);
+        if (parts.Length != 2 ||
+            !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var sourceChannel) ||
+            !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var destinationChannel))
+        {
+            return false;
+        }
+
+        route = new DirectChannelRouteInfo(sourceChannel, destinationChannel, $"{sourceChannel + 1} -> {destinationChannel + 1}");
+        return true;
+    }
+
+    private static bool TryParseCrossRouteConnectionKey(string key, out CrossRouteConnectionInfo info)
+    {
+        info = new CrossRouteConnectionInfo(-1, -1, -1, string.Empty);
+        var parts = key.Split('|', 4);
+        if (parts.Length != 4 ||
+            !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var sourceOffset) ||
+            !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var busIndex) ||
+            !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var destinationOffset))
+        {
+            return false;
+        }
+
+        info = new CrossRouteConnectionInfo(sourceOffset, busIndex, destinationOffset, parts[3]);
+        return true;
     }
 
 
@@ -4841,7 +5543,7 @@ public partial class MainWindow : Window
 
         if (_draggingEndpoint is not null && !_endpointDragMoved)
         {
-            SelectEndpoint(_draggingEndpointMode, _draggingEndpoint);
+            SelectCanvasEndpoint(_draggingEndpointMode, _draggingEndpoint);
         }
         else
         {

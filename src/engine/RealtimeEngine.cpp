@@ -30,7 +30,6 @@ constexpr int PingStatusTimeout = 4;
 constexpr int PingPulseSamples = 8;
 constexpr float PingPulseAmplitude = 0.80f;
 constexpr float PingDetectThreshold = 0.18f;
-constexpr int DelaySmoothingMilliseconds = 8;
 
 const float* sourceChannelPointer(AudioBufferView buffer, int readOffset, int channel) noexcept
 {
@@ -69,6 +68,17 @@ const float* currentChannelPointer(AudioBufferView buffer, int readOffset, int c
     }
 
     return sourceChannelPointer(buffer, readOffset, channel);
+}
+
+void markStereoPair(std::array<bool, MaxCallbackChannels>& active, int channel) noexcept
+{
+    if (channel < 0 || channel >= MaxCallbackChannels)
+        return;
+
+    const int base = channel - (channel % 2);
+    active[static_cast<size_t>(base)] = true;
+    if (base + 1 < MaxCallbackChannels)
+        active[static_cast<size_t>(base + 1)] = true;
 }
 
 const float* readChannelPointer(AudioBufferView buffer, int channel) noexcept
@@ -166,38 +176,6 @@ int delayStreamIndex(CallbackStreamKind kind) noexcept
 
     return 2;
 }
-
-float gainFromPercent(int percent) noexcept
-{
-    return static_cast<float>(std::clamp(percent, 0, 800)) / 100.0f;
-}
-
-int moveToward(int current, int target, int maximumStep) noexcept
-{
-    const int safeStep = std::max(1, maximumStep);
-    if (current < target)
-        return std::min(target, current + safeStep);
-
-    if (current > target)
-        return std::max(target, current - safeStep);
-
-    return current;
-}
-
-int delaySmoothingStepSamples(int sampleRate, int blockSize) noexcept
-{
-    const int fromMilliseconds = sampleRate > 0
-        ? (sampleRate * DelaySmoothingMilliseconds) / 1000
-        : 0;
-    return std::max(1, std::max(blockSize, fromMilliseconds));
-}
-
-size_t routeBufferOffset(int streamIndex, int route, int length) noexcept
-{
-    return ((static_cast<size_t>(std::clamp(streamIndex, 0, 2)) * static_cast<size_t>(RealtimeEngine::MaxDirectRoutes)) +
-            static_cast<size_t>(std::clamp(route, 0, RealtimeEngine::MaxDirectRoutes - 1))) *
-        static_cast<size_t>(std::max(0, length));
-}
 }
 
 RealtimeEngine::RealtimeEngine() noexcept
@@ -215,12 +193,6 @@ RealtimeEngine::RealtimeEngine() noexcept
         mainPluginGraphEnabled[channel].store(false, std::memory_order_relaxed);
         for (auto& positions : delayWritePositions)
             positions[channel] = 0;
-        for (auto& gains : smoothedChannelGains)
-            gains[channel] = 1.0f;
-        for (auto& delays : smoothedDelaySamples)
-            delays[channel] = 0;
-        for (auto& initialized : smoothedDelayInitialized)
-            initialized[channel] = false;
     }
 
     for (int route = 0; route < MaxDirectRoutes; ++route)
@@ -229,11 +201,8 @@ RealtimeEngine::RealtimeEngine() noexcept
         outputDirectRoutes.gainPercent[route].store(100, std::memory_order_relaxed);
         mainDirectRoutes.gainPercent[route].store(100, std::memory_order_relaxed);
         routeReadPositions[route] = 0;
-        for (auto& positions : routeWritePositions)
-            positions[route].store(0, std::memory_order_relaxed);
+        routeWritePositions[route].store(0, std::memory_order_relaxed);
         routeCounts[route] = 0;
-        for (auto& gains : smoothedRouteGains)
-            gains[route] = 1.0f;
     }
 
     try
@@ -373,9 +342,7 @@ bool RealtimeEngine::prepareDelayBuffers(int requestedSampleRate) noexcept
         delayBuffer.size() == static_cast<size_t>(requiredLength) *
             static_cast<size_t>(MaxChannels) *
             static_cast<size_t>(DelayStreamCount) &&
-        routeBuffer.size() == static_cast<size_t>(requiredRouteLength) *
-            static_cast<size_t>(MaxDirectRoutes) *
-            static_cast<size_t>(DelayStreamCount))
+        routeBuffer.size() == static_cast<size_t>(requiredRouteLength * MaxDirectRoutes))
     {
         return true;
     }
@@ -387,11 +354,7 @@ bool RealtimeEngine::prepareDelayBuffers(int requestedSampleRate) noexcept
                 static_cast<size_t>(MaxChannels) *
                 static_cast<size_t>(DelayStreamCount),
             0.0f);
-        routeBuffer.assign(
-            static_cast<size_t>(requiredRouteLength) *
-                static_cast<size_t>(MaxDirectRoutes) *
-                static_cast<size_t>(DelayStreamCount),
-            0.0f);
+        routeBuffer.assign(static_cast<size_t>(requiredRouteLength * MaxDirectRoutes), 0.0f);
     }
     catch (...)
     {
@@ -409,23 +372,10 @@ bool RealtimeEngine::prepareDelayBuffers(int requestedSampleRate) noexcept
             writePosition = 0;
     }
 
-    for (auto& delays : smoothedDelaySamples)
-    {
-        for (auto& delay : delays)
-            delay = 0;
-    }
-
-    for (auto& initialized : smoothedDelayInitialized)
-    {
-        for (auto&& state : initialized)
-            state = false;
-    }
-
     for (int route = 0; route < MaxDirectRoutes; ++route)
     {
         routeReadPositions[route] = 0;
-        for (auto& positions : routeWritePositions)
-            positions[route].store(0, std::memory_order_relaxed);
+        routeWritePositions[route].store(0, std::memory_order_relaxed);
         routeCounts[route] = 0;
     }
 
@@ -895,24 +845,9 @@ void RealtimeEngine::applyConfiguredDelays(AudioBufferView buffer, CallbackStrea
             continue;
 
         const int delayMs = delayBank[ch].load(std::memory_order_relaxed);
-        const int targetDelaySamples = std::min(
+        const int delaySamples = std::min(
             length - 1,
             static_cast<int>((static_cast<int64_t>(delayMs) * buffer.sampleRate) / 1000));
-        auto& delayInitialized = smoothedDelayInitialized[static_cast<size_t>(streamIndex)][static_cast<size_t>(ch)];
-        auto& smoothedDelay = smoothedDelaySamples[static_cast<size_t>(streamIndex)][static_cast<size_t>(ch)];
-        if (!delayInitialized)
-        {
-            smoothedDelay = targetDelaySamples;
-            delayInitialized = true;
-        }
-        else
-        {
-            smoothedDelay = moveToward(
-                smoothedDelay,
-                targetDelaySamples,
-                delaySmoothingStepSamples(buffer.sampleRate, buffer.samplesPerFrame));
-        }
-        const int delaySamples = std::clamp(smoothedDelay, 0, length - 1);
 
         const auto lineOffset =
             ((static_cast<size_t>(streamIndex) * static_cast<size_t>(MaxChannels)) + static_cast<size_t>(ch)) *
@@ -1233,6 +1168,18 @@ void RealtimeEngine::applyPluginPassthroughRoutes(
 {
     const auto& routeBank = pluginPassthroughBankFor(kind);
     const int routeCount = std::clamp(routeBank.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
+    std::array<bool, MaxChannels> gatedPairs {};
+    const bool gateSameBufferRoutes = kind != CallbackStreamKind::Main;
+    const bool canSnapshotRoutes =
+        gateSameBufferRoutes &&
+        buffer.samplesPerFrame >= 0 &&
+        buffer.samplesPerFrame <= MaxPluginScratchSamples &&
+        pluginBusBuffer.size() >=
+            static_cast<size_t>(routeCount) * static_cast<size_t>(MaxPluginScratchSamples);
+
+    std::array<int, MaxDirectRoutes> routeDestinations {};
+    std::array<const float*, MaxDirectRoutes> routeInputs {};
+    int validRouteCount = 0;
 
     for (int route = 0; route < routeCount; ++route)
     {
@@ -1250,7 +1197,42 @@ void RealtimeEngine::applyPluginPassthroughRoutes(
         if (input == nullptr || output == nullptr)
             continue;
 
-        if (input == output)
+        if (gateSameBufferRoutes)
+        {
+            markStereoPair(gatedPairs, source);
+            markStereoPair(gatedPairs, destination);
+        }
+
+        routeDestinations[static_cast<size_t>(validRouteCount)] = destination;
+
+        if (canSnapshotRoutes)
+        {
+            float* snapshot =
+                pluginBusBuffer.data() +
+                (static_cast<size_t>(validRouteCount) * static_cast<size_t>(MaxPluginScratchSamples));
+
+            for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
+                snapshot[sample] = input[sample];
+
+            routeInputs[static_cast<size_t>(validRouteCount)] = snapshot;
+        }
+        else
+        {
+            routeInputs[static_cast<size_t>(validRouteCount)] = input;
+        }
+
+        ++validRouteCount;
+    }
+
+    for (int route = 0; route < validRouteCount; ++route)
+    {
+        const int destination = routeDestinations[static_cast<size_t>(route)];
+        const float* input = routeInputs[static_cast<size_t>(route)];
+        float* output = buffer.write[destination];
+        if (input == nullptr || output == nullptr)
+            continue;
+
+        if (!gateSameBufferRoutes && input == output)
         {
             pluginOutputWritten[static_cast<size_t>(destination)] = true;
             continue;
@@ -1266,6 +1248,28 @@ void RealtimeEngine::applyPluginPassthroughRoutes(
             output[sample] += input[sample];
 
         pluginOutputWritten[static_cast<size_t>(destination)] = true;
+    }
+
+    if (!gateSameBufferRoutes)
+        return;
+
+    const int channels = std::max(0, std::min(buffer.outputChannels, MaxChannels));
+    for (int channel = 0; channel < channels; ++channel)
+    {
+        if (!gatedPairs[static_cast<size_t>(channel)] ||
+            pluginOutputWritten[static_cast<size_t>(channel)])
+        {
+            continue;
+        }
+
+        float* output = buffer.write[channel];
+        if (output == nullptr)
+            continue;
+
+        for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
+            output[sample] = 0.0f;
+
+        pluginOutputWritten[static_cast<size_t>(channel)] = true;
     }
 }
 
@@ -1378,27 +1382,20 @@ void RealtimeEngine::captureInputRoutes(
             continue;
 
         const int gainPercent = routeBank.gainPercent[static_cast<size_t>(route)].load(std::memory_order_relaxed);
-        auto& currentGain = smoothedRouteGains[0][static_cast<size_t>(route)];
-        const float targetGain = gainFromPercent(gainPercent);
-        const float gainStep = buffer.samplesPerFrame > 0
-            ? (targetGain - currentGain) / static_cast<float>(buffer.samplesPerFrame)
-            : 0.0f;
-        float gain = currentGain;
-        float* fifo = routeBuffer.data() + routeBufferOffset(0, route, length);
+        const float gain = static_cast<float>(gainPercent) / 100.0f;
+        float* fifo = routeBuffer.data() + (static_cast<size_t>(route) * static_cast<size_t>(length));
 
-        int write = routeWritePositions[0][static_cast<size_t>(route)].load(std::memory_order_relaxed);
+        int write = routeWritePositions[static_cast<size_t>(route)].load(std::memory_order_relaxed);
 
         for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
         {
-            gain += gainStep;
             fifo[write] = input[sample] * gain;
             ++write;
             if (write >= length)
                 write = 0;
         }
 
-        currentGain = targetGain;
-        routeWritePositions[0][static_cast<size_t>(route)].store(write, std::memory_order_release);
+        routeWritePositions[static_cast<size_t>(route)].store(write, std::memory_order_release);
 
         if (routeBank.muteSource[static_cast<size_t>(route)].load(std::memory_order_relaxed))
             muteSources[static_cast<size_t>(source)] = true;
@@ -1450,8 +1447,8 @@ void RealtimeEngine::mixCapturedInputRoutes(
             0,
             length - 1);
 
-        float* fifo = routeBuffer.data() + routeBufferOffset(0, route, length);
-        const int write = routeWritePositions[0][static_cast<size_t>(route)].load(std::memory_order_acquire);
+        float* fifo = routeBuffer.data() + (static_cast<size_t>(route) * static_cast<size_t>(length));
+        const int write = routeWritePositions[static_cast<size_t>(route)].load(std::memory_order_acquire);
         int read = write - delaySamples - buffer.samplesPerFrame;
         while (read < 0)
             read += length;
@@ -1478,8 +1475,6 @@ void RealtimeEngine::applySameBufferDirectRoutes(
 {
     const auto& routeBank = directRouteBankFor(kind);
     const int routeCount = std::clamp(routeBank.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
-    const int streamIndex = delayStreamIndex(kind);
-    const int length = routeBufferLength.load(std::memory_order_acquire);
 
     for (int route = 0; route < routeCount; ++route)
     {
@@ -1499,85 +1494,20 @@ void RealtimeEngine::applySameBufferDirectRoutes(
         if (input == nullptr || output == nullptr)
             continue;
 
-        const int gainPercent = routeBank.gainPercent[static_cast<size_t>(route)].load(std::memory_order_relaxed);
-        auto& currentGain = smoothedRouteGains[static_cast<size_t>(streamIndex)][static_cast<size_t>(route)];
-        const float targetGain = gainFromPercent(gainPercent);
-        const float gainStep = buffer.samplesPerFrame > 0
-            ? (targetGain - currentGain) / static_cast<float>(buffer.samplesPerFrame)
-            : 0.0f;
-        float gain = currentGain;
-
-        const int delayMs = routeBank.delayMilliseconds[static_cast<size_t>(route)].load(std::memory_order_relaxed);
-        const int delaySamples = std::clamp(
-            buffer.sampleRate > 0 ? static_cast<int>((static_cast<int64_t>(delayMs) * buffer.sampleRate) / 1000) : 0,
-            0,
-            std::max(0, length - 1));
-        const bool useDelay = delaySamples > 0 && length > 1 && !routeBuffer.empty();
-
-        if (useDelay)
+        if (input != output)
         {
-            float* fifo = routeBuffer.data() + routeBufferOffset(streamIndex, route, length);
-            int write = routeWritePositions[static_cast<size_t>(streamIndex)][static_cast<size_t>(route)].load(std::memory_order_relaxed);
-            for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
-            {
-                gain += gainStep;
-                fifo[write] = input[sample] * gain;
-                ++write;
-                if (write >= length)
-                    write = 0;
-            }
-
-            routeWritePositions[static_cast<size_t>(streamIndex)][static_cast<size_t>(route)].store(write, std::memory_order_release);
-
-            int read = write - delaySamples - buffer.samplesPerFrame;
-            while (read < 0)
-                read += length;
-            while (read >= length)
-                read -= length;
-
+            const int gainPercent = routeBank.gainPercent[static_cast<size_t>(route)].load(std::memory_order_relaxed);
+            const float gain = static_cast<float>(gainPercent) / 100.0f;
             if (kind == CallbackStreamKind::Main)
             {
                 for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
-                {
-                    output[sample] += fifo[read];
-                    ++read;
-                    if (read >= length)
-                        read = 0;
-                }
-            }
-            else
-            {
-                for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
-                {
-                    output[sample] = fifo[read];
-                    ++read;
-                    if (read >= length)
-                        read = 0;
-                }
-            }
-
-            currentGain = targetGain;
-        }
-        else if (input != output)
-        {
-            if (kind == CallbackStreamKind::Main)
-            {
-                for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
-                {
-                    gain += gainStep;
                     output[sample] += input[sample] * gain;
-                }
             }
             else
             {
                 for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
-                {
-                    gain += gainStep;
                     output[sample] = input[sample] * gain;
-                }
             }
-
-            currentGain = targetGain;
         }
 
         if (kind != CallbackStreamKind::Main &&
@@ -1631,33 +1561,19 @@ void RealtimeEngine::applyConfiguredGains(AudioBufferView buffer, CallbackStream
     for (int ch = 0; ch < safeChannels; ++ch)
     {
         if (!enabledBank[ch].load(std::memory_order_relaxed))
-        {
-            smoothedChannelGains[static_cast<size_t>(delayStreamIndex(kind))][static_cast<size_t>(ch)] = 1.0f;
             continue;
-        }
 
         const int gainPercent = gainBank[ch].load(std::memory_order_relaxed);
-        const int streamIndex = delayStreamIndex(kind);
-        auto& currentGain = smoothedChannelGains[static_cast<size_t>(streamIndex)][static_cast<size_t>(ch)];
-        const float targetGain = gainFromPercent(gainPercent);
-        if (gainPercent == 100 && currentGain == 1.0f)
+        if (gainPercent == 100)
             continue;
 
         float* out = buffer.write[ch];
         if (out == nullptr)
             continue;
 
-        const float gainStep = buffer.samplesPerFrame > 0
-            ? (targetGain - currentGain) / static_cast<float>(buffer.samplesPerFrame)
-            : 0.0f;
-        float gain = currentGain;
+        const float gain = static_cast<float>(gainPercent) / 100.0f;
         for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
-        {
-            gain += gainStep;
             out[sample] *= gain;
-        }
-
-        currentGain = targetGain;
     }
 }
 

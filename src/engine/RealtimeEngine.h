@@ -226,15 +226,11 @@ private:
     DirectRouteBank mainPluginPassthroughRoutes {};
     std::vector<float> pluginBusBuffer;
     std::array<std::array<int, MaxChannels>, DelayStreamCount> delayWritePositions {};
-    std::array<std::array<float, MaxChannels>, DelayStreamCount> smoothedChannelGains {};
-    std::array<std::array<int, MaxChannels>, DelayStreamCount> smoothedDelaySamples {};
-    std::array<std::array<bool, MaxChannels>, DelayStreamCount> smoothedDelayInitialized {};
     std::vector<float> delayBuffer;
     std::vector<float> routeBuffer;
     std::array<int, MaxDirectRoutes> routeReadPositions {};
-    std::array<std::array<std::atomic<int>, MaxDirectRoutes>, DelayStreamCount> routeWritePositions {};
+    std::array<std::atomic<int>, MaxDirectRoutes> routeWritePositions {};
     std::array<int, MaxDirectRoutes> routeCounts {};
-    std::array<std::array<float, MaxDirectRoutes>, DelayStreamCount> smoothedRouteGains {};
     std::atomic<int> delayBufferSampleRate { 0 };
     std::atomic<int> delayBufferLength { 0 };
     std::atomic<int> routeBufferLength { 0 };
