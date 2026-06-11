@@ -44,6 +44,7 @@ set(ELKA_NATIVE_CORE_SOURCES
     src/voicemeeter/VoicemeeterRemoteApi.cpp
     src/voicemeeter/VoicemeeterClient.cpp
     src/engine/RealtimeEngine.cpp
+    src/insert_asio/InsertAsioHost.cpp
     src/plugins/PluginHostLayer.cpp
 )
 
@@ -64,6 +65,8 @@ foreach(target IN ITEMS ElkaVoiceMeeterFxHost.Native)
         WIN32_LEAN_AND_MEAN
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
+        JUCE_ASIO=1
+        JUCE_ASIO_USE_EXTERNAL_SDK=0
         JUCE_DISABLE_ASSERTIONS=1
     )
 
@@ -99,6 +102,7 @@ if (ELKA_ENABLE_JUCE_PLUGIN_HOST)
         endif()
 
         target_link_libraries(${target} PRIVATE
+            juce::juce_audio_devices
             juce::juce_audio_processors
         )
     endforeach()

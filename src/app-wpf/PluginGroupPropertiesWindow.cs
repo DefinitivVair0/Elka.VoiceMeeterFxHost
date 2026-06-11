@@ -15,9 +15,10 @@ internal sealed class PluginGroupPropertiesWindow : Window
     private const string ConnectionNodeToNode = "node-to-node";
     private const string ConnectionGroupInputToNode = "group-input-to-node";
     private const string ConnectionNodeToGroupOutput = "node-to-group-output";
-    private const double CanvasWidth = 1180.0;
+    private const double MinimumCanvasWidth = 960.0;
     private const double CanvasHeight = 720.0;
     private const double NodeWidth = 148.0;
+    private const double GroupWallInset = 48.0;
     private const int GroupSidechainPinBase = 100;
 
     private readonly PluginGroupSnapshot _group;
@@ -145,7 +146,7 @@ internal sealed class PluginGroupPropertiesWindow : Window
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = _canvas
         };
-        _canvas.Width = CanvasWidth;
+        _canvas.Width = MinimumCanvasWidth;
         _canvas.Height = CanvasHeight;
         _canvas.Background = BrushFrom("#081316");
         _canvas.MouseMove += Canvas_MouseMove;
@@ -296,9 +297,12 @@ internal sealed class PluginGroupPropertiesWindow : Window
     {
         var viewportWidth = _canvasScrollViewer is null
             ? 0.0
-            : Math.Max(_canvasScrollViewer.ViewportWidth, _canvasScrollViewer.ActualWidth);
+            : _canvasScrollViewer.ViewportWidth > 0.0
+                ? _canvasScrollViewer.ViewportWidth
+                : _canvasScrollViewer.ActualWidth;
         var requiredWidth = RequiredCanvasWidthForMembers();
-        var newWidth = Math.Max(CanvasWidth, Math.Max(viewportWidth, requiredWidth));
+        var viewportExtent = viewportWidth > 2.0 ? viewportWidth - 2.0 : 0.0;
+        var newWidth = Math.Max(MinimumCanvasWidth, Math.Max(viewportExtent, requiredWidth));
         if (Math.Abs(_canvas.Width - newWidth) > 0.5)
         {
             _canvas.Width = newWidth;
@@ -313,14 +317,14 @@ internal sealed class PluginGroupPropertiesWindow : Window
             .Select(static node => node.X + NodeWidth)
             .DefaultIfEmpty(360.0)
             .Max();
-        return Math.Max(CanvasWidth, nodeRight + 180.0);
+        return Math.Max(MinimumCanvasWidth, nodeRight + 180.0);
     }
 
     private void DrawGroupWall(bool left)
     {
         var pinIds = left ? GroupInputPinIds().ToList() : GroupOutputPinIds().ToList();
-        var canvasWidth = Math.Max(CanvasWidth, _canvas.Width);
-        var x = left ? 14.0 : canvasWidth - 14.0;
+        var canvasWidth = Math.Max(MinimumCanvasWidth, _canvas.Width);
+        var x = left ? GroupWallInset : canvasWidth - GroupWallInset;
         var y = 96.0;
         var title = new TextBlock
         {
@@ -330,7 +334,7 @@ internal sealed class PluginGroupPropertiesWindow : Window
             FontSize = 11,
             IsHitTestVisible = false
         };
-        Canvas.SetLeft(title, left ? 18 : canvasWidth - 76);
+        Canvas.SetLeft(title, left ? GroupWallInset + 4 : canvasWidth - GroupWallInset - 62);
         Canvas.SetTop(title, 56);
         _canvas.Children.Add(title);
 
@@ -671,7 +675,7 @@ internal sealed class PluginGroupPropertiesWindow : Window
         }
 
         var point = e.GetPosition(_canvas);
-        _draggingNode.X = Math.Clamp((int)(point.X - _dragOffset.X), 170, (int)(Math.Max(CanvasWidth, _canvas.Width) - 250));
+        _draggingNode.X = Math.Clamp((int)(point.X - _dragOffset.X), 170, (int)(Math.Max(MinimumCanvasWidth, _canvas.Width) - 250));
         _draggingNode.Y = Math.Max(44, (int)(point.Y - _dragOffset.Y));
         MoveDragElements(_draggingNode.X - _dragOrigins.Values.Min(static origin => origin.X), _draggingNode.Y - _dragOrigins.Values.Min(static origin => origin.Y));
         e.Handled = true;
@@ -1081,7 +1085,7 @@ internal sealed class PluginGroupPropertiesWindow : Window
         for (var index = 0; index < _members.Count; index++)
         {
             var node = _members[index];
-            if (node.X < 170 || node.X > Math.Max(CanvasWidth, _canvas.Width) - 250 || node.Y < 44 || node.Y > CanvasHeight - 120)
+            if (node.X < 170 || node.X > Math.Max(MinimumCanvasWidth, _canvas.Width) - 250 || node.Y < 44 || node.Y > CanvasHeight - 120)
             {
                 node.X = 210 + (index * 180);
                 node.Y = 160 + ((index % 2) * 120);

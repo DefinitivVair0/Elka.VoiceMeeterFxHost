@@ -138,11 +138,12 @@ public:
     void setProbeChannels(int inputChannel, int outputChannel) noexcept;
     void updateFormat(int sampleRate, int blockSize) noexcept;
     void process(AudioBufferView buffer, CallbackStreamKind kind) noexcept;
+    void processInsertAsio(AudioBufferView buffer) noexcept;
     RealtimeStats getStats() const noexcept;
 
 private:
     static constexpr int MaxChannels = 64;
-    static constexpr int DelayStreamCount = 3;
+    static constexpr int DelayStreamCount = 4;
 
     using GainBank = std::array<std::atomic<int>, MaxChannels>;
     using DelayBank = std::array<std::atomic<int>, MaxChannels>;
@@ -173,18 +174,19 @@ private:
     const DirectRouteBank& directRouteBankFor(CallbackStreamKind kind) const noexcept;
     DirectRouteBank& pluginPassthroughBankFor(CallbackStreamKind kind) noexcept;
     const DirectRouteBank& pluginPassthroughBankFor(CallbackStreamKind kind) const noexcept;
+    void processInternal(AudioBufferView buffer, CallbackStreamKind kind, bool enableInputOutputRoutes, int delayStreamIndex) noexcept;
     void copyPassthrough(AudioBufferView buffer, int readOffset) noexcept;
-    void applyConfiguredDelays(AudioBufferView buffer, CallbackStreamKind kind, int readOffset) noexcept;
+    void applyConfiguredDelays(AudioBufferView buffer, CallbackStreamKind kind, int readOffset, int streamIndex) noexcept;
     void applyPlugins(AudioBufferView buffer, CallbackStreamKind kind, int readOffset, std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
-    void applyPluginPassthroughRoutes(AudioBufferView buffer, CallbackStreamKind kind, int readOffset, std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
+    void applyPluginPassthroughRoutes(AudioBufferView buffer, CallbackStreamKind kind, int readOffset, int streamIndex, std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
     void processSinglePingInput(AudioBufferView buffer) noexcept;
     void processSinglePingOutput(AudioBufferView buffer) noexcept;
-    void applyDirectRoutes(AudioBufferView buffer, CallbackStreamKind kind, int readOffset, std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
+    void applyDirectRoutes(AudioBufferView buffer, CallbackStreamKind kind, int readOffset, bool enableInputOutputRoutes, std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
     void captureInputRoutes(AudioBufferView buffer, int readOffset, std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
     void mixCapturedInputRoutes(AudioBufferView buffer, std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
     void applySameBufferDirectRoutes(AudioBufferView buffer, CallbackStreamKind kind, int readOffset, std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
     void applyPluginGraphGate(AudioBufferView buffer, CallbackStreamKind kind, const std::array<bool, MaxChannels>& pluginOutputWritten) noexcept;
-    void applyConfiguredGains(AudioBufferView buffer, CallbackStreamKind kind) noexcept;
+    void applyConfiguredGains(AudioBufferView buffer, CallbackStreamKind kind, int streamIndex) noexcept;
     void captureProbeRead(AudioBufferView buffer, CallbackStreamKind kind, int readOffset) noexcept;
     void captureProbeWrite(AudioBufferView buffer, CallbackStreamKind kind, int readOffset) noexcept;
     void publishTiming(double elapsedUsec, AudioBufferView buffer) noexcept;
@@ -225,12 +227,18 @@ private:
     DirectRouteBank outputPluginPassthroughRoutes {};
     DirectRouteBank mainPluginPassthroughRoutes {};
     std::vector<float> pluginBusBuffer;
+    std::vector<float> pluginPassthroughScratchBuffer;
     std::array<std::array<int, MaxChannels>, DelayStreamCount> delayWritePositions {};
+    std::array<std::array<float, MaxChannels>, DelayStreamCount> smoothedChannelGains {};
+    std::array<std::array<int, MaxChannels>, DelayStreamCount> smoothedDelaySamples {};
+    std::array<std::array<bool, MaxChannels>, DelayStreamCount> smoothedDelayInitialized {};
     std::vector<float> delayBuffer;
     std::vector<float> routeBuffer;
     std::array<int, MaxDirectRoutes> routeReadPositions {};
-    std::array<std::atomic<int>, MaxDirectRoutes> routeWritePositions {};
+    std::array<std::array<std::atomic<int>, MaxDirectRoutes>, DelayStreamCount> routeWritePositions {};
+    std::array<std::array<std::atomic<int>, MaxDirectRoutes>, DelayStreamCount> routePrimedSamples {};
     std::array<int, MaxDirectRoutes> routeCounts {};
+    std::array<std::array<float, MaxDirectRoutes>, DelayStreamCount> smoothedRouteGains {};
     std::atomic<int> delayBufferSampleRate { 0 };
     std::atomic<int> delayBufferLength { 0 };
     std::atomic<int> routeBufferLength { 0 };
@@ -281,6 +289,7 @@ private:
     std::atomic<int> blockSize { 0 };
     std::atomic<int> inputChannels { 0 };
     std::atomic<int> outputChannels { 0 };
+    std::atomic<bool> pluginProcessingActive { false };
     std::atomic<uint64_t> callbackCount { 0 };
     std::atomic<double> lastProcessUsec { 0.0 };
     std::atomic<double> peakProcessUsec { 0.0 };

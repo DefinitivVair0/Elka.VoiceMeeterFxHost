@@ -1,10 +1,12 @@
 #include "engine/RealtimeEngine.h"
+#include "insert_asio/InsertAsioHost.h"
 #include "plugins/PluginHostLayer.h"
 #include "voicemeeter/VoicemeeterClient.h"
 
 #include <windows.h>
 #include <audioclient.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -125,15 +127,20 @@ class NativeHost
 {
 public:
     NativeHost()
-        : client(engine)
+        : insertAsio(engine),
+          client(engine)
     {
     }
 
     RealtimeEngine engine;
+    InsertAsioHost insertAsio;
     PluginHostLayer plugins;
     VoicemeeterClient client;
     CallbackMode mode = CallbackMode::InputInsert;
     std::wstring lastStatus = L"Native engine ready";
+    std::array<int, 34> savedPatchInsertStates {};
+    std::array<bool, 34> savedPatchInsertStateValid {};
+    bool hasSavedPatchInsertStates = false;
 };
 
 std::mutex g_mutex;
@@ -149,6 +156,7 @@ constexpr int ExternalPingStatusTimeout = 2;
 constexpr float ExternalPingAmplitude = 0.85f;
 constexpr float ExternalPingThreshold = 0.35f;
 constexpr int ExternalPingPulseFrames = 128;
+constexpr int MaxInsertPatchChannels = 34;
 
 class ScopedCom
 {
@@ -224,6 +232,72 @@ int readIndexedParameter(NativeHost& target, const char* format, int index) noex
         return -1;
 
     return readRoundedParameter(target, parameterName);
+}
+
+bool writeIndexedParameter(NativeHost& target, const char* format, int index, float value) noexcept
+{
+    if (index < 0)
+        return false;
+
+    char parameterName[64] {};
+    const int written = std::snprintf(parameterName, sizeof(parameterName), format, index);
+    if (written <= 0 || written >= static_cast<int>(sizeof(parameterName)))
+        return false;
+
+    return target.client.setParameterFloat(parameterName, value);
+}
+
+int readPatchInsertState(NativeHost& target, int channel) noexcept
+{
+    auto result = readIndexedParameter(target, "Patch.insert[%d]", channel);
+    if (result < 0)
+        result = readIndexedParameter(target, "patch.insert[%d]", channel);
+
+    return result < 0 ? 0 : (result != 0 ? 1 : 0);
+}
+
+bool writePatchInsertState(NativeHost& target, int channel, int enabled) noexcept
+{
+    const float value = enabled != 0 ? 1.0f : 0.0f;
+    return writeIndexedParameter(target, "Patch.insert[%d]", channel, value) ||
+           writeIndexedParameter(target, "patch.insert[%d]", channel, value);
+}
+
+bool savePatchInsertStateIfNeeded(NativeHost& target, int channel) noexcept
+{
+    if (channel < 0 || channel >= MaxInsertPatchChannels)
+        return false;
+
+    const auto index = static_cast<size_t>(channel);
+    if (!target.savedPatchInsertStateValid[index])
+    {
+        target.savedPatchInsertStates[index] = readPatchInsertState(target, channel);
+        target.savedPatchInsertStateValid[index] = true;
+    }
+
+    target.hasSavedPatchInsertStates = true;
+    return true;
+}
+
+int restoreInsertPatchChannels(NativeHost& target) noexcept
+{
+    if (!target.hasSavedPatchInsertStates)
+        return 0;
+
+    int restored = 0;
+    for (int channel = 0; channel < MaxInsertPatchChannels; ++channel)
+    {
+        const auto index = static_cast<size_t>(channel);
+        if (!target.savedPatchInsertStateValid[index])
+            continue;
+
+        if (writePatchInsertState(target, channel, target.savedPatchInsertStates[index]))
+            ++restored;
+        target.savedPatchInsertStateValid[index] = false;
+    }
+
+    target.hasSavedPatchInsertStates = false;
+    return restored;
 }
 
 void writeWide(const std::wstring& text, wchar_t* buffer, int bufferChars) noexcept
@@ -829,14 +903,36 @@ int runExternalWasapiPing(
     return 1;
 }
 
+int clampVoiceMeeterSampleRate(int sampleRate) noexcept
+{
+    return sampleRate > 0 ? std::clamp(sampleRate, 8000, 192000) : 0;
+}
+
+int configuredVoiceMeeterSampleRate(NativeHost& target) noexcept
+{
+    int sampleRate = 0;
+    return target.client.getConfiguredSampleRate(sampleRate)
+        ? clampVoiceMeeterSampleRate(sampleRate)
+        : 0;
+}
+
+int activeVoiceMeeterSampleRate(NativeHost& target) noexcept
+{
+    const auto stats = target.engine.getStats();
+    const int liveSampleRate = clampVoiceMeeterSampleRate(stats.sampleRate);
+    if (liveSampleRate > 0)
+        return liveSampleRate;
+
+    return configuredVoiceMeeterSampleRate(target);
+}
+
 bool startLocked(NativeHost& target, std::wstring& error)
 {
     if (!target.client.connect(error))
         return false;
 
-    int configuredSampleRate = 48000;
-    target.client.getConfiguredSampleRate(configuredSampleRate);
-    if (!target.engine.prepareDelayBuffers(configuredSampleRate))
+    const int configuredSampleRate = configuredVoiceMeeterSampleRate(target);
+    if (configuredSampleRate > 0 && !target.engine.prepareDelayBuffers(configuredSampleRate))
     {
         error = L"Failed to allocate delay buffers for " + std::to_wstring(configuredSampleRate) + L" Hz";
         return false;
@@ -844,6 +940,15 @@ bool startLocked(NativeHost& target, std::wstring& error)
 
     if (!target.client.start(error))
         return false;
+
+    const int activeSampleRate = activeVoiceMeeterSampleRate(target);
+    if (activeSampleRate > 0 &&
+        target.engine.getDelayBufferSampleRate() != activeSampleRate &&
+        !target.engine.prepareDelayBuffers(activeSampleRate))
+    {
+        error = L"Failed to allocate delay buffers for " + std::to_wstring(activeSampleRate) + L" Hz";
+        return false;
+    }
 
     target.lastStatus = target.client.statusText();
     return true;
@@ -1043,10 +1148,97 @@ __declspec(dllexport) void __cdecl ElkaFx_Shutdown()
     std::unique_lock scanLock(g_scanMutex, std::try_to_lock);
     std::lock_guard lock(g_mutex);
     if (g_host)
+    {
+        std::wstring ignored;
+        restoreInsertPatchChannels(*g_host);
+        g_host->insertAsio.stop(ignored);
         g_host->client.disconnect();
+    }
 
     if (scanLock.owns_lock())
         g_host.reset();
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_ProbeInsertAsio(int expectedChannelCount, wchar_t* status, int statusChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    std::wstring message;
+    const bool ok = target.insertAsio.probe(expectedChannelCount, message);
+    writeWide(message, status, statusChars);
+    return ok ? 0 : -1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_StartInsertAsio(int expectedChannelCount, wchar_t* status, int statusChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    std::wstring error;
+    if (!target.client.connect(error))
+    {
+        writeWide(error.empty() ? L"Could not connect to VoiceMeeter Remote API." : error, status, statusChars);
+        return -1;
+    }
+
+    const auto stats = target.engine.getStats();
+    const int requestedSampleRate = activeVoiceMeeterSampleRate(target);
+    const int requestedBlockSize = stats.blockSize > 0 ? stats.blockSize : 512;
+
+    std::wstring message;
+    const bool ok = target.insertAsio.start(requestedSampleRate, requestedBlockSize, expectedChannelCount, message);
+    if (ok)
+        message += L" | Patch.insert arming follows the selected input toggles.";
+
+    writeWide(message, status, statusChars);
+    return ok ? 0 : -1;
+}
+
+__declspec(dllexport) void __cdecl ElkaFx_StopInsertAsio(wchar_t* status, int statusChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    std::wstring message;
+    const int restored = restoreInsertPatchChannels(target);
+    target.insertAsio.stop(message);
+    if (restored > 0)
+    {
+        message += L" Restored Patch.insert ";
+        message += std::to_wstring(restored);
+        message += L"/";
+        message += std::to_wstring(MaxInsertPatchChannels);
+        message += L".";
+    }
+
+    writeWide(message, status, statusChars);
+}
+
+__declspec(dllexport) void __cdecl ElkaFx_GetInsertAsioStatus(wchar_t* status, int statusChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    std::wstring message;
+    target.insertAsio.status(message);
+    writeWide(message, status, statusChars);
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_IsInsertAsioRunning()
+{
+    std::lock_guard lock(g_mutex);
+    return g_host && g_host->insertAsio.isRunning() ? 1 : 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_SetPatchInsertEnabled(int inputChannel, int enabled)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+
+    if (inputChannel < 0 || inputChannel >= MaxInsertPatchChannels)
+        return -1;
+
+    if (!savePatchInsertStateIfNeeded(target, inputChannel))
+        return -1;
+
+    return writePatchInsertState(target, inputChannel, enabled != 0 ? 1 : 0) ? 0 : -1;
 }
 
 __declspec(dllexport) int __cdecl ElkaFx_SetMode(int mode, wchar_t* status, int statusChars)
@@ -1460,8 +1652,20 @@ __declspec(dllexport) int __cdecl ElkaFx_AddPluginNode(
     const std::string layoutName =
         layoutChannels == 1 ? "Mono" : layoutChannels == 2 ? "Stereo" : std::to_string(layoutChannels) + " channel";
 
-    int sampleRate = 48000;
-    target.client.getConfiguredSampleRate(sampleRate);
+    int sampleRate = activeVoiceMeeterSampleRate(target);
+    if (sampleRate <= 0)
+    {
+        std::wstring startError;
+        startLocked(target, startError);
+        sampleRate = activeVoiceMeeterSampleRate(target);
+    }
+
+    if (sampleRate <= 0)
+    {
+        writeWide(L"Plugin node add failed: VoiceMeeter has not reported a sample rate yet.", status, statusChars);
+        return -1;
+    }
+
     const auto stats = target.engine.getStats();
     const int maxBlockSize = std::max(4096, stats.blockSize > 0 ? stats.blockSize : 512);
 

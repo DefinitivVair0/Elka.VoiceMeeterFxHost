@@ -184,6 +184,14 @@ bool VoicemeeterClient::getParameterFloat(const char* parameterName, float& valu
     return api.getParameterFloat(parameterName, &value) == 0;
 }
 
+bool VoicemeeterClient::setParameterFloat(const char* parameterName, float value) const noexcept
+{
+    if (parameterName == nullptr)
+        return false;
+
+    return api.setParameterFloat(parameterName, value) == 0;
+}
+
 bool VoicemeeterClient::getLevel(int type, int channel, float& value) const noexcept
 {
     value = 0.0f;
@@ -205,7 +213,11 @@ long VoicemeeterClient::handleAudioCallback(long command, void* data, long) noex
     {
         auto* info = static_cast<vmr::AudioInfo*>(data);
         if (info != nullptr)
+        {
             engine.updateFormat(static_cast<int>(info->sampleRate), static_cast<int>(info->samplesPerFrame));
+            if (info->sampleRate > 0)
+                engine.prepareDelayBuffers(static_cast<int>(info->sampleRate));
+        }
 
         return 0;
     }

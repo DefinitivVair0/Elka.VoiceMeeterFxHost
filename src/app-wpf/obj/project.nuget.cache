@@ -1,8 +1,13 @@
 {
   "version": 2,
-  "dgSpecHash": "WpZlB2+AOAY=",
+  "dgSpecHash": "peDcmC5T+sM=",
   "success": true,
   "projectFilePath": "C:\\Users\\torme\\source\\repos\\Elka.VoiceMeeterFxHost\\src\\app-wpf\\Elka.VoiceMeeterFxHost.App.csproj",
-  "expectedPackageFiles": [],
+  "expectedPackageFiles": [
+    "C:\\Users\\torme\\.nuget\\packages\\microsoft.net.illink.tasks\\8.0.28\\microsoft.net.illink.tasks.8.0.28.nupkg.sha512",
+    "C:\\Users\\torme\\.nuget\\packages\\microsoft.netcore.app.runtime.win-x64\\8.0.28\\microsoft.netcore.app.runtime.win-x64.8.0.28.nupkg.sha512",
+    "C:\\Users\\torme\\.nuget\\packages\\microsoft.windowsdesktop.app.runtime.win-x64\\8.0.28\\microsoft.windowsdesktop.app.runtime.win-x64.8.0.28.nupkg.sha512",
+    "C:\\Users\\torme\\.nuget\\packages\\microsoft.aspnetcore.app.runtime.win-x64\\8.0.28\\microsoft.aspnetcore.app.runtime.win-x64.8.0.28.nupkg.sha512"
+  ],
   "logs": []
 }

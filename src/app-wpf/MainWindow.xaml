@@ -420,11 +420,20 @@
                   <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <TextBlock Grid.Row="0"
-                           Grid.Column="0"
-                           Text="Patch-through control placeholder"
-                           Style="{StaticResource MutedText}"
-                           VerticalAlignment="Center" />
+                <StackPanel Grid.Row="0"
+                            Grid.Column="0"
+                            Orientation="Horizontal">
+                  <TextBlock Text="Insert driver host"
+                             Style="{StaticResource MutedText}"
+                             VerticalAlignment="Center" />
+                  <CheckBox x:Name="InsertAsioAutoStartCheckBox"
+                            Content="Auto-start"
+                            Margin="12,0,0,0"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource MutedTextBrush}"
+                            Checked="InsertAsioAutoStart_Changed"
+                            Unchecked="InsertAsioAutoStart_Changed" />
+                </StackPanel>
                 <StackPanel Grid.Row="0"
                             Grid.Column="1"
                             Orientation="Horizontal">
@@ -432,32 +441,31 @@
                           Width="64"
                           Padding="8,5"
                           Style="{StaticResource RouteButton}"
-                          IsEnabled="False" />
+                          Click="ProbeInsertAsioButton_Click" />
                   <Button Content="Start"
                           Width="64"
                           Padding="8,5"
                           Margin="6,0,0,0"
                           Style="{StaticResource RouteButton}"
-                          IsEnabled="False" />
+                          Click="StartInsertAsioButton_Click" />
                   <Button Content="Stop"
                           Width="64"
                           Padding="8,5"
                           Margin="6,0,0,0"
                           Style="{StaticResource RouteButton}"
-                          IsEnabled="False" />
+                          Click="StopInsertAsioButton_Click" />
                 </StackPanel>
-                <CheckBox Grid.Row="1"
-                          Grid.ColumnSpan="2"
-                          Content="Auto-start patch host"
-                          Margin="0,8,0,0"
-                          IsEnabled="False"
-                          Foreground="{StaticResource MutedTextBrush}" />
-                <TextBlock Grid.Row="2"
+                <TextBlock x:Name="InsertAsioStatusTextBlock"
+                           Grid.Row="1"
                            Grid.ColumnSpan="2"
-                           Text="ASIO patch host UI is staged here; audio wiring is intentionally disabled in this build."
+                           Text="Insert ASIO host stopped."
                            Margin="0,8,0,0"
                            TextWrapping="Wrap"
                            Style="{StaticResource MutedText}" />
+                <WrapPanel x:Name="InsertAsioEndpointTogglesPanel"
+                           Grid.Row="2"
+                           Grid.ColumnSpan="2"
+                           Margin="0,8,0,0" />
               </Grid>
             </Grid>
           </Border>
@@ -556,8 +564,8 @@
               <ScrollViewer HorizontalScrollBarVisibility="Auto"
                             VerticalScrollBarVisibility="Auto">
                 <Canvas x:Name="RoutingCanvas"
-                        Width="980"
-                        Height="920"
+                        Width="929"
+                        Height="737"
                         Background="{StaticResource FieldBrush}"
                         MouseMove="RoutingCanvas_MouseMove"
                         MouseLeftButtonUp="RoutingCanvas_MouseLeftButtonUp"
