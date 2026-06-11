@@ -86,11 +86,17 @@ public:
     int scanPluginPaths(const std::vector<std::string>& paths, bool append, int formatFlags);
     bool loadDiscoveredPlugin(size_t index, int sampleRate, int maxBlockSize, int routeChannelCount);
     void unloadPlugin() noexcept;
-    int addDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount);
+    int addDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount, const std::string& initialStateBase64 = {}, const std::string& initialPresetBase64 = {});
     void removePluginNode(int slot) noexcept;
     void clearPluginNodes() noexcept;
     bool openPluginEditor(int slot);
     void closePluginEditor(int slot) noexcept;
+    std::string pluginNodeStateBase64(int slot);
+    bool setPluginNodeStateBase64(int slot, const std::string& stateBase64);
+    std::string pluginNodePresetBase64(int slot);
+    bool setPluginNodePresetBase64(int slot, const std::string& presetBase64);
+    std::string pluginNodeParameterStateBase64(int slot);
+    bool setPluginNodeParameterStateBase64(int slot, const std::string& parameterStateBase64);
     bool togglePluginNodeInputRoute(int slot, int sourceChannel, int pluginPin) noexcept;
     bool togglePluginNodeOutputRoute(int slot, int pluginPin, int destinationChannel) noexcept;
     bool togglePluginNodeModuleRoute(int sourceSlot, int sourcePin, int destinationSlot, int destinationPin) noexcept;

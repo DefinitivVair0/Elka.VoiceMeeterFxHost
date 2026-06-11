@@ -21,6 +21,11 @@
   <SolidColorBrush x:Key="RouteActiveBrush" Color="#14392F" />
   <SolidColorBrush x:Key="VolumeAccentBrush" Color="#E2B84A" />
   <SolidColorBrush x:Key="VbanAccentBrush" Color="#3A6CDA" />
+  <SolidColorBrush x:Key="VbanActiveBrush" Color="#10295A" />
+  <SolidColorBrush x:Key="VstAccentBrush" Color="#F08A3E" />
+  <SolidColorBrush x:Key="VstActiveBrush" Color="#3A2115" />
+  <SolidColorBrush x:Key="AsioAccentBrush" Color="#8B7CFF" />
+  <SolidColorBrush x:Key="AsioActiveBrush" Color="#211D42" />
 
   <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#11171B" />
   <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#EDF3F6" />
@@ -465,6 +470,24 @@
   <Style x:Key="RouteButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
     <Setter Property="Background" Value="{StaticResource RouteActiveBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource RouteAccentBrush}" />
+  </Style>
+
+  <Style x:Key="VbanButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+    <Setter Property="Background" Value="{StaticResource VbanActiveBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource VbanAccentBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <Style x:Key="VstButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+    <Setter Property="Background" Value="{StaticResource VstActiveBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource VstAccentBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <Style x:Key="AsioButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+    <Setter Property="Background" Value="{StaticResource AsioActiveBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource AsioAccentBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
   <Style TargetType="ListBox">

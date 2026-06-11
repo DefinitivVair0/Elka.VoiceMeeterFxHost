@@ -142,7 +142,7 @@
 
           <Border x:Name="VstRoutingCard"
                   Style="{StaticResource PanelCard}"
-                  BorderBrush="{StaticResource RouteAccentBrush}"
+                  BorderBrush="{StaticResource VstAccentBrush}"
                   Margin="0,0,0,16">
             <Grid>
               <Grid.RowDefinitions>
@@ -160,15 +160,16 @@
                         HorizontalContentAlignment="Left"
                         FontSize="18"
                         FontWeight="SemiBold"
-                        Foreground="{StaticResource RouteAccentBrush}"
-                        Style="{StaticResource RouteButton}"
+                        Foreground="{StaticResource VstAccentBrush}"
+                        BorderBrush="{StaticResource VstAccentBrush}"
+                        Style="{StaticResource VstButton}"
                         Click="VstRoutingToggleButton_Click" />
                 <Button Grid.Column="1"
                         x:Name="AddNodeButton"
                         Content="Add Node"
                         Width="92"
                         Margin="8,0,0,0"
-                        Style="{StaticResource RouteButton}"
+                        Style="{StaticResource VstButton}"
                         Click="AddNodeButton_Click" />
               </Grid>
 
@@ -193,7 +194,7 @@
                   <Button Content="Add Folder"
                           Width="96"
                           Margin="0,0,8,0"
-                          Style="{StaticResource RouteButton}"
+                          Style="{StaticResource VstButton}"
                           Click="AddPluginFolderButton_Click"
                           ToolTip="Add a custom VST folder to the scan list." />
                   <TextBox x:Name="PluginSearchTextBox"
@@ -207,7 +208,7 @@
                             Content="All"
                             Width="50"
                             Padding="8,6"
-                            Style="{StaticResource RouteButton}"
+                            Style="{StaticResource VstButton}"
                             Tag="All"
                             Click="PluginFormatFilterButton_Click" />
                     <Button x:Name="PluginFormatVst3Button"
@@ -215,7 +216,7 @@
                             Width="58"
                             Padding="8,6"
                             Margin="6,0,0,0"
-                            Style="{StaticResource RouteButton}"
+                            Style="{StaticResource VstButton}"
                             Tag="Vst3"
                             Click="PluginFormatFilterButton_Click" />
                     <Button x:Name="PluginFormatVst2Button"
@@ -223,7 +224,7 @@
                             Width="58"
                             Padding="8,6"
                             Margin="6,0,0,0"
-                            Style="{StaticResource RouteButton}"
+                            Style="{StaticResource VstButton}"
                             Tag="Vst2"
                             Click="PluginFormatFilterButton_Click" />
                   </StackPanel>
@@ -232,7 +233,7 @@
                           Content="Scan"
                           Width="72"
                           Margin="8,0,0,0"
-                          Style="{StaticResource RouteButton}"
+                          Style="{StaticResource VstButton}"
                           Click="ScanButton_Click" />
                 </Grid>
 
@@ -313,7 +314,7 @@
                       FontWeight="SemiBold"
                       Foreground="{StaticResource VbanAccentBrush}"
                       BorderBrush="{StaticResource VbanAccentBrush}"
-                      Style="{StaticResource RouteButton}"
+                      Style="{StaticResource VbanButton}"
                       Click="VbanTextToggleButton_Click" />
 
               <Grid x:Name="VbanTextContentGrid"
@@ -356,6 +357,7 @@
                         Content="VFX Commands"
                         Width="124"
                         Margin="8,0,0,0"
+                        Style="{StaticResource VbanButton}"
                         Click="OpenVfxCommandsButton_Click" />
 
                 <StackPanel Grid.Row="1"
@@ -388,7 +390,7 @@
 
           <Border x:Name="AsioPatchCard"
                   Style="{StaticResource PanelCard}"
-                  BorderBrush="{StaticResource RouteAccentBrush}"
+                  BorderBrush="{StaticResource AsioAccentBrush}"
                   Margin="0,0,0,16">
             <Grid>
               <Grid.RowDefinitions>
@@ -402,8 +404,9 @@
                       HorizontalContentAlignment="Left"
                       FontSize="18"
                       FontWeight="SemiBold"
-                      Foreground="{StaticResource RouteAccentBrush}"
-                      Style="{StaticResource RouteButton}"
+                      Foreground="{StaticResource AsioAccentBrush}"
+                      BorderBrush="{StaticResource AsioAccentBrush}"
+                      Style="{StaticResource AsioButton}"
                       Click="AsioPatchToggleButton_Click" />
 
               <Grid x:Name="AsioPatchContentGrid"
@@ -440,19 +443,19 @@
                   <Button Content="Probe"
                           Width="64"
                           Padding="8,5"
-                          Style="{StaticResource RouteButton}"
+                          Style="{StaticResource AsioButton}"
                           Click="ProbeInsertAsioButton_Click" />
                   <Button Content="Start"
                           Width="64"
                           Padding="8,5"
                           Margin="6,0,0,0"
-                          Style="{StaticResource RouteButton}"
+                          Style="{StaticResource AsioButton}"
                           Click="StartInsertAsioButton_Click" />
                   <Button Content="Stop"
                           Width="64"
                           Padding="8,5"
                           Margin="6,0,0,0"
-                          Style="{StaticResource RouteButton}"
+                          Style="{StaticResource AsioButton}"
                           Click="StopInsertAsioButton_Click" />
                 </StackPanel>
                 <TextBlock x:Name="InsertAsioStatusTextBlock"

@@ -364,6 +364,9 @@ internal sealed class PluginNodeSnapshot
 {
     public string Name { get; set; } = "VST";
     public int PluginIndex { get; set; } = -1;
+    public string PluginStateBase64 { get; set; } = string.Empty;
+    public string PluginPresetBase64 { get; set; } = string.Empty;
+    public string PluginParameterStateBase64 { get; set; } = string.Empty;
     public int Slot { get; set; }
     public int X { get; set; } = 430;
     public int Y { get; set; } = 120;
@@ -458,16 +461,18 @@ internal static class FxHostSettingsStore
         }
     }
 
-    public static void Save(FxHostSettings settings)
+    public static bool Save(FxHostSettings settings)
     {
         try
         {
             Directory.CreateDirectory(SettingsDirectory);
             File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, JsonOptions));
+            return true;
         }
         catch
         {
             // Persistence should never interrupt the audio engine or UI.
+            return false;
         }
     }
 
@@ -514,6 +519,8 @@ internal sealed class NativeEngineClient : IDisposable
     }
 
     public bool IsAttached => _attached;
+
+    public bool HasAudioClock => _attached && GetStats().SampleRate > 0;
 
     public string StatusText
     {
@@ -925,7 +932,9 @@ internal sealed class NativeEngineClient : IDisposable
         int sidechainInputPins,
         int outputPins,
         int x,
-        int y)
+        int y,
+        string? initialStateBase64 = null,
+        string? initialPresetBase64 = null)
     {
         if (!_attached)
         {
@@ -936,19 +945,39 @@ internal sealed class NativeEngineClient : IDisposable
         var slot = 0;
         var loadedInputPins = 0;
         var loadedOutputPins = 0;
-        var result = ElkaFx_AddPluginNode(
-            choice.Index,
-            (int)mode,
-            mainInputPins,
-            sidechainInputPins,
-            outputPins,
-            x,
-            y,
-            ref slot,
-            ref loadedInputPins,
-            ref loadedOutputPins,
-            status,
-            status.Capacity);
+        var hasInitialPluginData =
+            !string.IsNullOrWhiteSpace(initialStateBase64) ||
+            !string.IsNullOrWhiteSpace(initialPresetBase64);
+
+        var result = !hasInitialPluginData
+            ? ElkaFx_AddPluginNode(
+                choice.Index,
+                (int)mode,
+                mainInputPins,
+                sidechainInputPins,
+                outputPins,
+                x,
+                y,
+                ref slot,
+                ref loadedInputPins,
+                ref loadedOutputPins,
+                status,
+                status.Capacity)
+            : ElkaFx_AddPluginNodeWithState(
+                choice.Index,
+                (int)mode,
+                mainInputPins,
+                sidechainInputPins,
+                outputPins,
+                x,
+                y,
+                initialStateBase64 ?? string.Empty,
+                initialPresetBase64 ?? string.Empty,
+                ref slot,
+                ref loadedInputPins,
+                ref loadedOutputPins,
+                status,
+                status.Capacity);
 
         if (status.Length > 0)
         {
@@ -1011,6 +1040,111 @@ internal sealed class NativeEngineClient : IDisposable
         ElkaFx_OpenPluginEditor(slot, status, status.Capacity);
         _lastStatus = status.Length > 0 ? status.ToString() : _lastStatus;
         return _lastStatus;
+    }
+
+    public string GetPluginNodeState(int slot)
+    {
+        return TryGetPluginNodeState(slot, out var state) ? state : string.Empty;
+    }
+
+    public bool TryGetPluginNodeState(int slot, out string state)
+    {
+        if (!_attached)
+        {
+            state = string.Empty;
+            return false;
+        }
+
+        var required = Math.Clamp(ElkaFx_GetPluginNodeStateLength(slot), 1, 16 * 1024 * 1024);
+        var builder = new StringBuilder(required);
+        if (ElkaFx_GetPluginNodeState(slot, builder, builder.Capacity) != 0)
+        {
+            state = string.Empty;
+            return false;
+        }
+
+        state = builder.ToString();
+        return true;
+    }
+
+    public string GetPluginNodePreset(int slot)
+    {
+        return TryGetPluginNodePreset(slot, out var preset) ? preset : string.Empty;
+    }
+
+    public bool TryGetPluginNodePreset(int slot, out string preset)
+    {
+        if (!_attached)
+        {
+            preset = string.Empty;
+            return false;
+        }
+
+        var required = Math.Clamp(ElkaFx_GetPluginNodePresetLength(slot), 1, 32 * 1024 * 1024);
+        var builder = new StringBuilder(required);
+        if (ElkaFx_GetPluginNodePreset(slot, builder, builder.Capacity) != 0)
+        {
+            preset = string.Empty;
+            return false;
+        }
+
+        preset = builder.ToString();
+        return true;
+    }
+
+    public bool SetPluginNodeState(int slot, string? stateBase64)
+    {
+        if (_attached && !string.IsNullOrWhiteSpace(stateBase64))
+        {
+            return ElkaFx_SetPluginNodeState(slot, stateBase64) == 0;
+        }
+
+        return false;
+    }
+
+    public bool SetPluginNodePreset(int slot, string? presetBase64)
+    {
+        if (_attached && !string.IsNullOrWhiteSpace(presetBase64))
+        {
+            return ElkaFx_SetPluginNodePreset(slot, presetBase64) == 0;
+        }
+
+        return false;
+    }
+
+    public string GetPluginNodeParameterState(int slot)
+    {
+        return TryGetPluginNodeParameterState(slot, out var parameterState) ? parameterState : string.Empty;
+    }
+
+    public bool TryGetPluginNodeParameterState(int slot, out string parameterState)
+    {
+        if (!_attached)
+        {
+            parameterState = string.Empty;
+            return false;
+        }
+
+        var required = Math.Clamp(ElkaFx_GetPluginNodeParameterStateLength(slot), 1, 32 * 1024 * 1024);
+        var builder = new StringBuilder(required);
+        if (ElkaFx_GetPluginNodeParameterState(slot, builder, builder.Capacity) != 0)
+        {
+            parameterState = string.Empty;
+            return false;
+        }
+
+        parameterState = builder.ToString();
+        return true;
+    }
+
+    public bool SetPluginNodeParameterState(int slot, string? parameterStateBase64)
+    {
+        if (_attached && !string.IsNullOrWhiteSpace(parameterStateBase64))
+        {
+            return ElkaFx_SetPluginNodeParameterState(slot, parameterStateBase64) == 0;
+        }
+
+        return false;
     }
 
     public void RemovePluginNode(int slot)
@@ -1249,6 +1383,23 @@ internal sealed class NativeEngineClient : IDisposable
         StringBuilder status,
         int statusChars);
 
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_AddPluginNodeWithState(
+        int pluginIndex,
+        int mode,
+        int mainInputPins,
+        int sidechainInputPins,
+        int outputPins,
+        int x,
+        int y,
+        string initialStateBase64,
+        string initialPresetBase64,
+        ref int slotOut,
+        ref int inputPinsOut,
+        ref int outputPinsOut,
+        StringBuilder status,
+        int statusChars);
+
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_SetPluginNodeBypassed(int slot, int bypassed);
 
@@ -1263,6 +1414,33 @@ internal sealed class NativeEngineClient : IDisposable
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_OpenPluginEditor(int slot, StringBuilder status, int statusChars);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginNodeStateLength(int slot);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginNodeState(int slot, StringBuilder buffer, int bufferChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_SetPluginNodeState(int slot, string stateBase64);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginNodePresetLength(int slot);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginNodePreset(int slot, StringBuilder buffer, int bufferChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_SetPluginNodePreset(int slot, string presetBase64);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginNodeParameterStateLength(int slot);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginNodeParameterState(int slot, StringBuilder buffer, int bufferChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_SetPluginNodeParameterState(int slot, string parameterStateBase64);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_RemovePluginNode(int slot);

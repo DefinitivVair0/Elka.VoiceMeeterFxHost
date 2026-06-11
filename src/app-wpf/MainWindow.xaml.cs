@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private CrossRoutePinInfo? _crossRouteDragStart;
     private Path? _crossRoutePreview;
     private string? _selectedCanvasConnectionKey;
+    private readonly HashSet<int> _pluginNodesPendingSavedDataApply = [];
     private string? _selectedCrossRouteConnectionKey;
     private string? _selectedDirectChannelRouteKey;
     private int _expandedCrossRouteBusIndex = -1;
@@ -55,9 +56,16 @@ public partial class MainWindow : Window
     private bool _updatingChannelToggle;
     private CallbackMode _vstCanvasMode = CallbackMode.Input;
     private VstInputCanvasRouteView _vstInputCanvasRouteView = VstInputCanvasRouteView.InputReturn;
+    private readonly DispatcherTimer _pluginRestoreTimer;
+    private bool _savedPluginNodesRestored;
+    private int _savedPluginRestoreAttempts;
+    private Point _pluginListDragStartPoint;
+    private PluginChoice? _pluginListDragChoice;
+    private PluginStateCaptureSummary _lastPluginStateCapture;
 
     private const int DefaultVbanControlPort = 6981;
     private const string DefaultVbanControlStreamName = "Command1";
+    private const string PluginChoiceDragFormat = "ElkaVoiceMeeterFxHost.PluginChoice";
     private const string PinEndpointSource = "endpoint-source";
     private const string PinEndpointDestination = "endpoint-destination";
     private const string PinNodeInput = "node-input";
@@ -78,6 +86,8 @@ public partial class MainWindow : Window
     private const double VstNodeWidth = 138.0;
     private const double VstGroupWidth = VstNodeWidth;
     private const int CollapsedVisiblePinCount = 2;
+    private const int MaxSavedPluginRestoreAttempts = 80;
+    private const double DragPreviewXCorrection = 6.0;
     private static readonly RouteHueChoice[] RouteHueChoices =
     [
         new("Blue", "blue", "#4AA3FF", "#10243A"),
@@ -99,6 +109,17 @@ public partial class MainWindow : Window
         InputReturn,
         DirectOutput
     }
+
+    private readonly record struct PluginStateCaptureSummary(
+        int Captured,
+        int Failed,
+        long Characters,
+        long PresetCharacters,
+        long ParameterCharacters,
+        int LooseCaptured,
+        int LooseTotal);
+
+    private readonly record struct PluginDisplayNameParts(string Product, string Suffix);
 
     public MainWindow()
     {
@@ -125,6 +146,11 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromMilliseconds(30)
         };
         _channelApplyTimer.Tick += (_, _) => ApplyQueuedChannelChanges();
+        _pluginRestoreTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(250)
+        };
+        _pluginRestoreTimer.Tick += (_, _) => RestoreSavedPluginNodesWhenReady();
         VbanEnableCheckBox.Checked += VbanControl_Changed;
         VbanEnableCheckBox.Unchecked += VbanControl_Changed;
         VbanLocalOnlyCheckBox.Checked += VbanControl_Changed;
@@ -134,6 +160,11 @@ public partial class MainWindow : Window
         VbanPortTextBox.KeyDown += VbanControl_KeyDown;
         VbanStreamTextBox.KeyDown += VbanControl_KeyDown;
         PreviewKeyDown += MainWindow_PreviewKeyDown;
+        PluginListBox.PreviewMouseLeftButtonDown += PluginListBox_PreviewMouseLeftButtonDown;
+        PluginListBox.MouseMove += PluginListBox_MouseMove;
+        RoutingCanvas.AllowDrop = true;
+        RoutingCanvas.DragOver += RoutingCanvas_DragOver;
+        RoutingCanvas.Drop += RoutingCanvas_Drop;
         VstWorkspaceView.SizeChanged += (_, _) =>
         {
             if (_workspaceView == WorkspaceView.Vst)
@@ -148,6 +179,7 @@ public partial class MainWindow : Window
         InsertAsioStatusTextBlock.Text = _engine.InsertAsioStatus();
         UpdatePluginFormatButtons();
         PopulatePluginList();
+        QueueSavedPluginNodeRestore();
         SelectMode(_selectedMode);
         SelectWorkspaceView(WorkspaceView.Vst);
         ApplyVbanControlSettingsFromUi(showErrors: false);
@@ -323,6 +355,7 @@ public partial class MainWindow : Window
             var result = await Task.Run(() => _engine.ScanPlugins(folders, formatFilter));
             AppendLog(result);
             PopulatePluginList();
+            QueueSavedPluginNodeRestore();
         }
         catch (Exception ex)
         {
@@ -521,10 +554,28 @@ public partial class MainWindow : Window
         _vfxCommandsWindow.Activate();
     }
 
-    private void SaveButton_Click(object sender, RoutedEventArgs e)
+    private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
-        SaveSettings();
-        AppendLog("Saved WPF layout and route state.");
+        var button = sender as Button;
+        if (button is not null)
+            button.IsEnabled = false;
+
+        try
+        {
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await Task.Delay(250);
+
+            var saved = SaveSettings();
+            var capture = _lastPluginStateCapture;
+            AppendLog(saved
+                ? $"Saved layout, routes, and {capture.Captured} VST state(s) ({capture.Characters:n0} state chars, {capture.PresetCharacters:n0} preset chars, {capture.ParameterCharacters:n0} parameter chars, {capture.Failed} failed, {capture.LooseCaptured}/{capture.LooseTotal} loose)."
+                : "Save failed: settings file could not be written.");
+        }
+        finally
+        {
+            if (button is not null)
+                button.IsEnabled = true;
+        }
     }
 
     private void RefreshCanvasButton_Click(object sender, RoutedEventArgs e)
@@ -654,8 +705,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SaveSettings()
+    private bool SaveSettings()
     {
+        CapturePluginNodeStates();
         _settings.Kind = _kind;
         _settings.SelectedMode = _selectedMode;
         _settings.SelectedEndpointName = _selectedEndpoint?.Name;
@@ -671,7 +723,78 @@ public partial class MainWindow : Window
         _settings.Endpoints = _settingsByEndpoint.Values
             .Select(static settings => settings.ToSnapshot())
             .ToList();
-        FxHostSettingsStore.Save(_settings);
+        return FxHostSettingsStore.Save(_settings);
+    }
+
+    private PluginStateCaptureSummary CapturePluginNodeStates()
+    {
+        var captured = 0;
+        var failed = 0;
+        var looseCaptured = 0;
+        var looseTotal = 0;
+        long characters = 0;
+        long presetCharacters = 0;
+        long parameterCharacters = 0;
+
+        foreach (var node in _settings.PluginNodes)
+        {
+            var loose = IsLoosePluginNode(node);
+            if (loose)
+            {
+                looseTotal++;
+            }
+
+            if (_pluginNodesPendingSavedDataApply.Contains(node.Slot) && HasSavedPluginData(node))
+            {
+                captured++;
+                characters += node.PluginStateBase64.Length;
+                presetCharacters += node.PluginPresetBase64.Length;
+                parameterCharacters += node.PluginParameterStateBase64.Length;
+                if (loose)
+                {
+                    looseCaptured++;
+                }
+
+                continue;
+            }
+
+            if (_engine.TryGetPluginNodeState(node.Slot, out var state))
+            {
+                node.PluginStateBase64 = state;
+                captured++;
+                characters += state.Length;
+                if (loose)
+                {
+                    looseCaptured++;
+                }
+            }
+            else
+            {
+                failed++;
+            }
+
+            if (_engine.TryGetPluginNodePreset(node.Slot, out var preset))
+            {
+                node.PluginPresetBase64 = preset;
+                presetCharacters += preset.Length;
+            }
+
+            if (_engine.TryGetPluginNodeParameterState(node.Slot, out var parameterState))
+            {
+                node.PluginParameterStateBase64 = parameterState;
+                parameterCharacters += parameterState.Length;
+            }
+        }
+
+        _lastPluginStateCapture = new PluginStateCaptureSummary(captured, failed, characters, presetCharacters, parameterCharacters, looseCaptured, looseTotal);
+        return _lastPluginStateCapture;
+    }
+
+    private bool IsLoosePluginNode(PluginNodeSnapshot node)
+    {
+        return !_settings.CanvasConnections.Any(connection =>
+            connection.FromSlot == node.Slot ||
+            connection.ToSlot == node.Slot);
     }
 
     private void QueueSave()
@@ -862,6 +985,12 @@ public partial class MainWindow : Window
         }
 
         if (DeleteSelectedConnection())
+        {
+            e.Handled = true;
+            return;
+        }
+
+        if (DeleteSelectedVstCanvasItem())
         {
             e.Handled = true;
         }
@@ -1500,7 +1629,7 @@ public partial class MainWindow : Window
         ChannelsWorkspaceView.Visibility = view == WorkspaceView.Channels ? Visibility.Visible : Visibility.Collapsed;
         VstWorkspaceView.Visibility = view == WorkspaceView.Vst ? Visibility.Visible : Visibility.Collapsed;
         SetWorkspaceButtonTone(ChannelsWorkspaceButton, view == WorkspaceView.Channels);
-        SetWorkspaceButtonTone(VstWorkspaceButton, view == WorkspaceView.Vst);
+        SetAccentButtonTone(VstWorkspaceButton, view == WorkspaceView.Vst, "VstAccentBrush", "NeutralBrush");
         RefreshVstRouteViewButtons();
 
         if (view == WorkspaceView.Channels)
@@ -1574,9 +1703,16 @@ public partial class MainWindow : Window
 
     private void SetWorkspaceButtonTone(Button button, bool selected)
     {
+        SetAccentButtonTone(button, selected, "RouteAccentBrush", "NeutralBrush");
+    }
+
+    private void SetAccentButtonTone(Button button, bool selected, string accentBrushKey, string inactiveBrushKey)
+    {
+        var accent = (Brush)FindResource(accentBrushKey);
         button.Background = selected
-            ? (Brush)FindResource("RouteAccentBrush")
-            : (Brush)FindResource("NeutralBrush");
+            ? accent
+            : (Brush)FindResource(inactiveBrushKey);
+        button.BorderBrush = accent;
         button.Foreground = selected
             ? new SolidColorBrush(Color.FromRgb(6, 19, 22))
             : (Brush)FindResource("TextBrush");
@@ -1586,9 +1722,9 @@ public partial class MainWindow : Window
     {
         var filter = SanitizePluginFormatFilter(_settings.PluginFormatFilter);
         _settings.PluginFormatFilter = filter;
-        SetWorkspaceButtonTone(PluginFormatAllButton, filter == PluginFormatFilter.All);
-        SetWorkspaceButtonTone(PluginFormatVst3Button, filter == PluginFormatFilter.Vst3);
-        SetWorkspaceButtonTone(PluginFormatVst2Button, filter == PluginFormatFilter.Vst2);
+        SetAccentButtonTone(PluginFormatAllButton, filter == PluginFormatFilter.All, "VstAccentBrush", "VstActiveBrush");
+        SetAccentButtonTone(PluginFormatVst3Button, filter == PluginFormatFilter.Vst3, "VstAccentBrush", "VstActiveBrush");
+        SetAccentButtonTone(PluginFormatVst2Button, filter == PluginFormatFilter.Vst2, "VstAccentBrush", "VstActiveBrush");
     }
 
     private void SetPluginScanControlsEnabled(bool enabled)
@@ -1894,6 +2030,15 @@ public partial class MainWindow : Window
             hueMenu.Items.Add(item);
         }
 
+        hueMenu.Items.Add(new Separator());
+        var customLabel = IsCustomRouteHueKey(currentHue)
+            ? $"Custom ({CustomRouteHueDisplayHex(currentHue)})"
+            : "Custom...";
+        var custom = CreateNodeMenuItem(customLabel, () => ChooseCustomEndpointRouteHue(mode, endpoint));
+        custom.IsCheckable = true;
+        custom.IsChecked = IsCustomRouteHueKey(currentHue);
+        hueMenu.Items.Add(custom);
+
         menu.Items.Add(hueMenu);
         return menu;
     }
@@ -2013,6 +2158,31 @@ public partial class MainWindow : Window
         QueueSave();
     }
 
+    private void ExpandCanvasEndpointPins(CallbackMode mode, IoEndpoint endpoint)
+    {
+        if (!CanChangeEndpointPinMode(endpoint))
+        {
+            SelectCanvasEndpoint(mode, endpoint);
+            return;
+        }
+
+        SetEndpointPinMode(mode, endpoint, EndpointPinMode.Full);
+    }
+
+    private void ToggleCanvasEndpointPins(CallbackMode mode, IoEndpoint endpoint)
+    {
+        if (!CanChangeEndpointPinMode(endpoint))
+        {
+            SelectCanvasEndpoint(mode, endpoint);
+            return;
+        }
+
+        var nextMode = EndpointPinModeFor(mode, endpoint) == EndpointPinMode.Full
+            ? EndpointPinMode.Stereo
+            : EndpointPinMode.Full;
+        SetEndpointPinMode(mode, endpoint, nextMode);
+    }
+
     private static bool CanChangeEndpointPinMode(IoEndpoint endpoint)
     {
         return endpoint.ChannelCount > 2;
@@ -2021,7 +2191,7 @@ public partial class MainWindow : Window
     private string? EndpointRouteHueKey(string endpointKey)
     {
         return _settings.EndpointRouteHues.TryGetValue(endpointKey, out var hueKey) &&
-               RouteHueChoices.Any(choice => choice.Key == hueKey)
+               IsValidRouteHueKey(hueKey)
             ? hueKey
             : null;
     }
@@ -2045,13 +2215,27 @@ public partial class MainWindow : Window
     private Brush? HueStrokeBrush(string? hueKey)
     {
         var hue = RouteHueChoices.FirstOrDefault(choice => choice.Key == hueKey);
-        return hue is null ? null : BrushFromHex(hue.StrokeHex);
+        if (hue is not null)
+        {
+            return BrushFromHex(hue.StrokeHex);
+        }
+
+        return TryParseCustomRouteHue(hueKey, out var color)
+            ? new SolidColorBrush(color)
+            : null;
     }
 
     private Brush? HueFillBrush(string? hueKey)
     {
         var hue = RouteHueChoices.FirstOrDefault(choice => choice.Key == hueKey);
-        return hue is null ? null : BrushFromHex(hue.FillHex);
+        if (hue is not null)
+        {
+            return BrushFromHex(hue.FillHex);
+        }
+
+        return TryParseCustomRouteHue(hueKey, out var color)
+            ? new SolidColorBrush(MixColor(Color.FromRgb(17, 23, 27), color, 0.32))
+            : null;
     }
 
     private Brush WireStrokeBrush(string? hueKey)
@@ -2072,6 +2256,65 @@ public partial class MainWindow : Window
     private static SolidColorBrush BrushFromHex(string hex)
     {
         return new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)!);
+    }
+
+    private static bool IsValidRouteHueKey(string? hueKey)
+    {
+        return RouteHueChoices.Any(choice => choice.Key == hueKey) ||
+               IsCustomRouteHueKey(hueKey);
+    }
+
+    private static bool IsCustomRouteHueKey(string? hueKey)
+    {
+        return TryParseCustomRouteHue(hueKey, out _);
+    }
+
+    private static bool TryParseCustomRouteHue(string? hueKey, out Color color)
+    {
+        color = default;
+        if (string.IsNullOrWhiteSpace(hueKey))
+        {
+            return false;
+        }
+
+        var hex = hueKey.StartsWith("custom:", StringComparison.OrdinalIgnoreCase)
+            ? hueKey["custom:".Length..]
+            : hueKey;
+        if (hex.Length != 7 || hex[0] != '#')
+        {
+            return false;
+        }
+
+        try
+        {
+            color = (Color)ColorConverter.ConvertFromString(hex)!;
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static string CustomRouteHueKey(Color color)
+    {
+        return $"custom:#{color.R:X2}{color.G:X2}{color.B:X2}";
+    }
+
+    private static string CustomRouteHueDisplayHex(string? hueKey)
+    {
+        return TryParseCustomRouteHue(hueKey, out var color)
+            ? $"#{color.R:X2}{color.G:X2}{color.B:X2}"
+            : "#55C27A";
+    }
+
+    private static Color MixColor(Color baseColor, Color accentColor, double accentAmount)
+    {
+        var baseAmount = 1.0 - accentAmount;
+        return Color.FromRgb(
+            (byte)Math.Clamp(Math.Round((baseColor.R * baseAmount) + (accentColor.R * accentAmount)), 0, 255),
+            (byte)Math.Clamp(Math.Round((baseColor.G * baseAmount) + (accentColor.G * accentAmount)), 0, 255),
+            (byte)Math.Clamp(Math.Round((baseColor.B * baseAmount) + (accentColor.B * accentAmount)), 0, 255));
     }
 
     private EndpointChannelSettings GetOrCreateChannelSettings(CallbackMode mode, IoEndpoint endpoint)
@@ -2385,17 +2628,13 @@ public partial class MainWindow : Window
         AttachChannelSliderInteraction(delaySlider, normalStep: 10, fineStep: 1, fastStep: 100);
         delayText.LostFocus += (_, _) =>
         {
-            if (TryParseUiDouble(delayText.Text, out var value))
-            {
-                delaySlider.Value = Math.Clamp(value, 0, 10_000);
-                FlushQueuedChannelChanges();
-            }
+            CommitChannelTextBoxValue(delayText, delaySlider, "0");
         };
         delayText.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter)
             {
-                Keyboard.ClearFocus();
+                CommitChannelTextBoxValue(delayText, delaySlider, "0", selectText: true);
                 e.Handled = true;
             }
         };
@@ -2500,17 +2739,13 @@ public partial class MainWindow : Window
             fastStep: isSendStrip ? 3 : 5);
         volumeText.LostFocus += (_, _) =>
         {
-            if (TryParseUiDouble(volumeText.Text, out var value))
-            {
-                volumeSlider.Value = Math.Clamp(value, volumeSlider.Minimum, volumeSlider.Maximum);
-                FlushQueuedChannelChanges();
-            }
+            CommitChannelTextBoxValue(volumeText, volumeSlider, isSendStrip ? "0.0" : "0");
         };
         volumeText.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter)
             {
-                Keyboard.ClearFocus();
+                CommitChannelTextBoxValue(volumeText, volumeSlider, isSendStrip ? "0.0" : "0", selectText: true);
                 e.Handled = true;
             }
         };
@@ -2682,17 +2917,13 @@ public partial class MainWindow : Window
         AttachChannelSliderInteraction(delaySlider, normalStep: 10, fineStep: 1, fastStep: 100);
         delayText.LostFocus += (_, _) =>
         {
-            if (TryParseUiDouble(delayText.Text, out var value))
-            {
-                delaySlider.Value = Math.Clamp(value, 0, 10_000);
-                FlushQueuedChannelChanges();
-            }
+            CommitChannelTextBoxValue(delayText, delaySlider, "0");
         };
         delayText.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter)
             {
-                Keyboard.ClearFocus();
+                CommitChannelTextBoxValue(delayText, delaySlider, "0", selectText: true);
                 e.Handled = true;
             }
         };
@@ -2781,17 +3012,13 @@ public partial class MainWindow : Window
         AttachChannelSliderInteraction(volumeSlider, normalStep: 0.5, fineStep: 0.1, fastStep: 3);
         volumeText.LostFocus += (_, _) =>
         {
-            if (TryParseUiDouble(volumeText.Text, out var value))
-            {
-                volumeSlider.Value = Math.Clamp(value, volumeSlider.Minimum, volumeSlider.Maximum);
-                FlushQueuedChannelChanges();
-            }
+            CommitChannelTextBoxValue(volumeText, volumeSlider, "0.0");
         };
         volumeText.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter)
             {
-                Keyboard.ClearFocus();
+                CommitChannelTextBoxValue(volumeText, volumeSlider, "0.0", selectText: true);
                 e.Handled = true;
             }
         };
@@ -2814,6 +3041,24 @@ public partial class MainWindow : Window
     {
         return double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value)
                || double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    private void CommitChannelTextBoxValue(TextBox textBox, Slider slider, string format, bool selectText = false)
+    {
+        if (!TryParseUiDouble(textBox.Text, out var value))
+        {
+            textBox.Text = slider.Value.ToString(format, CultureInfo.CurrentCulture);
+            return;
+        }
+
+        slider.Value = Math.Clamp(value, slider.Minimum, slider.Maximum);
+        textBox.Text = slider.Value.ToString(format, CultureInfo.CurrentCulture);
+        FlushQueuedChannelChanges();
+
+        if (selectText)
+        {
+            textBox.SelectAll();
+        }
     }
 
     private int SelectedCrossRouteBusIndex(EndpointChannelSettings settings)
@@ -3870,13 +4115,191 @@ public partial class MainWindow : Window
         else
         {
             _settings.EndpointRouteHues[endpointKey] = hueKey;
-            var hueName = RouteHueChoices.FirstOrDefault(choice => choice.Key == hueKey)?.Name ?? hueKey;
+            var hueName = RouteHueDisplayName(hueKey);
             AppendLog($"{endpoint.DisplayName}: route hue set to {hueName}.");
         }
 
         RefreshEndpointButtonSelection();
         RebuildRoutingCanvas();
         QueueSave();
+    }
+
+    private void ChooseCustomEndpointRouteHue(CallbackMode mode, IoEndpoint endpoint)
+    {
+        var currentHue = EndpointRouteHueKey(endpoint.Key(mode));
+        var initialColor = TryParseCustomRouteHue(currentHue, out var customColor)
+            ? customColor
+            : Color.FromRgb(0x55, 0xC2, 0x7A);
+
+        var selectedColor = PromptForRouteHueColor(endpoint.DisplayName, initialColor);
+        if (selectedColor is null)
+        {
+            return;
+        }
+
+        SetEndpointRouteHue(mode, endpoint, CustomRouteHueKey(selectedColor.Value));
+    }
+
+    private Color? PromptForRouteHueColor(string endpointName, Color initialColor)
+    {
+        var windowBrush = ThemeBrushOr("WindowBrush", "#071114");
+        var textBrush = ThemeBrushOr("TextBrush", "#E7EEF0");
+        var mutedTextBrush = ThemeBrushOr("MutedTextBrush", "#8AA0A6");
+        var fieldBrush = ThemeBrushOr("FieldBrush", "#0E1B1F");
+        var routeAccentBrush = ThemeBrushOr("RouteAccentBrush", "#55C27A");
+        var dialog = new Window
+        {
+            Title = $"{endpointName} Route Hue",
+            Owner = this,
+            Width = 380,
+            Height = 285,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = windowBrush,
+            Foreground = textBrush
+        };
+
+        var root = new Grid { Margin = new Thickness(14) };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var header = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+        var preview = new Border
+        {
+            Width = 58,
+            Height = 34,
+            Background = new SolidColorBrush(initialColor),
+            BorderBrush = routeAccentBrush,
+            BorderThickness = new Thickness(1),
+            Margin = new Thickness(0, 0, 12, 0)
+        };
+        var hexText = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = textBrush,
+            FontWeight = FontWeights.SemiBold
+        };
+        header.Children.Add(preview);
+        header.Children.Add(hexText);
+        root.Children.Add(header);
+
+        var sliders = new StackPanel();
+        Grid.SetRow(sliders, 1);
+        root.Children.Add(sliders);
+
+        var redSlider = CreateHueSlider("R", initialColor.R, mutedTextBrush, fieldBrush, routeAccentBrush);
+        var greenSlider = CreateHueSlider("G", initialColor.G, mutedTextBrush, fieldBrush, routeAccentBrush);
+        var blueSlider = CreateHueSlider("B", initialColor.B, mutedTextBrush, fieldBrush, routeAccentBrush);
+        sliders.Children.Add(redSlider.Row);
+        sliders.Children.Add(greenSlider.Row);
+        sliders.Children.Add(blueSlider.Row);
+
+        void UpdatePreview()
+        {
+            var color = Color.FromRgb(
+                (byte)Math.Clamp(Math.Round(redSlider.Slider.Value), 0, 255),
+                (byte)Math.Clamp(Math.Round(greenSlider.Slider.Value), 0, 255),
+                (byte)Math.Clamp(Math.Round(blueSlider.Slider.Value), 0, 255));
+            preview.Background = new SolidColorBrush(color);
+            hexText.Text = $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+            dialog.Tag = color;
+        }
+
+        redSlider.Slider.ValueChanged += (_, _) => UpdatePreview();
+        greenSlider.Slider.ValueChanged += (_, _) => UpdatePreview();
+        blueSlider.Slider.ValueChanged += (_, _) => UpdatePreview();
+        UpdatePreview();
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 16, 0, 0)
+        };
+        var cancel = new Button
+        {
+            Content = "Cancel",
+            MinWidth = 84,
+            Margin = new Thickness(0, 0, 8, 0)
+        };
+        cancel.Click += (_, _) => dialog.DialogResult = false;
+        var ok = new Button
+        {
+            Content = "Apply",
+            MinWidth = 84,
+            IsDefault = true
+        };
+        ok.Click += (_, _) => dialog.DialogResult = true;
+        buttons.Children.Add(cancel);
+        buttons.Children.Add(ok);
+        Grid.SetRow(buttons, 3);
+        root.Children.Add(buttons);
+
+        dialog.Content = root;
+        return dialog.ShowDialog() == true && dialog.Tag is Color color ? color : null;
+    }
+
+    private static (Grid Row, Slider Slider) CreateHueSlider(
+        string label,
+        byte value,
+        Brush labelBrush,
+        Brush fieldBrush,
+        Brush accentBrush)
+    {
+        var row = new Grid { Margin = new Thickness(0, 4, 0, 4) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
+
+        row.Children.Add(new TextBlock
+        {
+            Text = label,
+            Foreground = labelBrush,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        var slider = new Slider
+        {
+            Minimum = 0,
+            Maximum = 255,
+            Value = value,
+            IsSnapToTickEnabled = true,
+            TickFrequency = 1,
+            Background = fieldBrush,
+            Foreground = accentBrush,
+            Margin = new Thickness(8, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(slider, 1);
+        row.Children.Add(slider);
+
+        var number = new TextBlock
+        {
+            Text = value.ToString(CultureInfo.InvariantCulture),
+            Foreground = labelBrush,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextAlignment = TextAlignment.Right
+        };
+        slider.ValueChanged += (_, _) =>
+        {
+            number.Text = Math.Round(slider.Value).ToString(CultureInfo.InvariantCulture);
+        };
+        Grid.SetColumn(number, 2);
+        row.Children.Add(number);
+
+        return (row, slider);
+    }
+
+    private static string RouteHueDisplayName(string hueKey)
+    {
+        return RouteHueChoices.FirstOrDefault(choice => choice.Key == hueKey)?.Name ??
+               (IsCustomRouteHueKey(hueKey) ? $"Custom {CustomRouteHueDisplayHex(hueKey)}" : hueKey);
     }
 
     private void UpdateRouteEnabled(EndpointChannelSettings settings, int offset, bool enabled)
@@ -3961,36 +4384,586 @@ public partial class MainWindow : Window
         return PluginListBox.SelectedItem as PluginChoice;
     }
 
-    private void AddPluginNode(PluginChoice? choice)
+    private void PluginListBox_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _pluginListDragStartPoint = e.GetPosition(null);
+        _pluginListDragChoice = PluginChoiceFromElement(e.OriginalSource as DependencyObject) ??
+                                PluginListBox.SelectedItem as PluginChoice;
+    }
+
+    private void PluginListBox_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || _pluginListDragChoice is null)
+        {
+            return;
+        }
+
+        var current = e.GetPosition(null);
+        if (Math.Abs(current.X - _pluginListDragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(current.Y - _pluginListDragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+        {
+            return;
+        }
+
+        var data = new DataObject();
+        data.SetData(typeof(PluginChoice), _pluginListDragChoice);
+        data.SetData(PluginChoiceDragFormat, _pluginListDragChoice);
+        DragDrop.DoDragDrop(PluginListBox, data, DragDropEffects.Copy);
+        _pluginListDragChoice = null;
+    }
+
+    private void RoutingCanvas_DragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = PluginChoiceFromDrag(e.Data) is null ? DragDropEffects.None : DragDropEffects.Copy;
+        e.Handled = true;
+    }
+
+    private void RoutingCanvas_Drop(object sender, DragEventArgs e)
+    {
+        var choice = PluginChoiceFromDrag(e.Data);
+        if (choice is null)
+        {
+            return;
+        }
+
+        AddPluginNode(choice, e.GetPosition(RoutingCanvas));
+        e.Handled = true;
+    }
+
+    private void Group_DragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = PluginChoiceFromDrag(e.Data) is null ? DragDropEffects.None : DragDropEffects.Copy;
+        e.Handled = true;
+    }
+
+    private void Group_Drop(object sender, DragEventArgs e)
+    {
+        if (sender is not Border { Tag: PluginGroupSnapshot group })
+        {
+            return;
+        }
+
+        var choice = PluginChoiceFromDrag(e.Data);
+        if (choice is null)
+        {
+            return;
+        }
+
+        AddPluginNode(choice, e.GetPosition(RoutingCanvas), group);
+        e.Handled = true;
+    }
+
+    private static PluginChoice? PluginChoiceFromDrag(IDataObject data)
+    {
+        if (data.GetDataPresent(typeof(PluginChoice)) &&
+            data.GetData(typeof(PluginChoice)) is PluginChoice typedChoice)
+        {
+            return typedChoice;
+        }
+
+        return data.GetDataPresent(PluginChoiceDragFormat)
+            ? data.GetData(PluginChoiceDragFormat) as PluginChoice
+            : null;
+    }
+
+    private static PluginChoice? PluginChoiceFromElement(DependencyObject? source)
+    {
+        while (source is not null)
+        {
+            if (source is FrameworkElement { DataContext: PluginChoice choice })
+            {
+                return choice;
+            }
+
+            source = VisualTreeHelper.GetParent(source);
+        }
+
+        return null;
+    }
+
+    private PluginNodeSnapshot? AddPluginNode(
+        PluginChoice? choice,
+        Point? canvasPoint = null,
+        PluginGroupSnapshot? targetGroup = null)
     {
         if (choice is null)
         {
             AppendLog("Select a scanned plugin first.");
-            return;
+            return null;
         }
 
+        var point = canvasPoint ?? _lastCanvasClick;
+        var mode = targetGroup?.Mode ?? CurrentVstCanvasNodeMode();
         var node = _engine.AddPluginNode(
             choice,
-            CurrentVstCanvasNodeMode(),
+            mode,
             mainInputPins: 2,
             sidechainInputPins: 0,
             outputPins: 2,
-            Math.Max(300, (int)_lastCanvasClick.X),
-            Math.Max(80, (int)_lastCanvasClick.Y));
+            Math.Max(300, (int)point.X),
+            Math.Max(80, (int)point.Y));
         if (node is null)
         {
             AppendLog(_engine.StatusText);
-            return;
+            return null;
         }
 
+        node.Name = UniquePluginNodeName(choice.Name);
         _settings.PluginNodes.RemoveAll(existing => existing.Slot == node.Slot);
         _settings.PluginNodes.Add(node);
         _selectedPluginNodeSlot = node.Slot;
         AppendLog($"Loaded VST node: {node.Name}");
+        if (targetGroup is not null)
+        {
+            AddNodeToGroup(node, targetGroup);
+            return node;
+        }
+
         RefreshEngineCallbackMode();
         RebuildVstNodeList();
         RebuildRoutingCanvas();
         QueueSave();
+        return node;
+    }
+
+    private void QueueSavedPluginNodeRestore()
+    {
+        if (_savedPluginNodesRestored || _settings.PluginNodes.Count == 0)
+        {
+            return;
+        }
+
+        _pluginRestoreTimer.Stop();
+        _pluginRestoreTimer.Start();
+    }
+
+    private void RestoreSavedPluginNodesWhenReady()
+    {
+        _pluginRestoreTimer.Stop();
+        if (_savedPluginNodesRestored || _settings.PluginNodes.Count == 0)
+        {
+            return;
+        }
+
+        var pluginChoices = _engine.PluginChoices();
+        if (pluginChoices.Count == 0)
+        {
+            AppendLog("Saved VST graph is waiting for the plugin list. Run Scan if the list is empty.");
+            return;
+        }
+
+        if (!_engine.HasAudioClock)
+        {
+            if (_savedPluginRestoreAttempts++ < MaxSavedPluginRestoreAttempts)
+            {
+                _pluginRestoreTimer.Start();
+                return;
+            }
+
+            AppendLog("Saved VST graph was not restored yet because VoiceMeeter has not reported an audio clock.");
+            return;
+        }
+
+        RestoreSavedPluginNodes(pluginChoices);
+    }
+
+    private void RestoreSavedPluginNodes(IReadOnlyList<PluginChoice> pluginChoices)
+    {
+        var savedNodes = _settings.PluginNodes
+            .Select(ClonePluginNodeSnapshot)
+            .ToList();
+        var savedConnections = _settings.CanvasConnections
+            .Select(CloneConnection)
+            .ToList();
+        var oldSelectedSlot = _selectedPluginNodeSlot;
+        var slotMap = new Dictionary<int, PluginNodeSnapshot>();
+        var restoredNodes = new List<PluginNodeSnapshot>();
+
+        foreach (var savedNode in savedNodes)
+        {
+            var choice = SavedPluginChoice(savedNode, pluginChoices);
+            if (choice is null)
+            {
+                AppendLog($"{savedNode.Name}: saved VST could not be matched in the scanned plugin list.");
+                continue;
+            }
+
+            var restored = _engine.AddPluginNode(
+                choice,
+                savedNode.Mode == CallbackMode.None ? CallbackMode.Input : savedNode.Mode,
+                Math.Clamp(savedNode.MainInputPins, 1, 8),
+                Math.Clamp(savedNode.SidechainInputPins, 0, 24),
+                Math.Clamp(savedNode.OutputPins, 1, 8),
+                savedNode.X,
+                savedNode.Y,
+                savedNode.PluginStateBase64,
+                savedNode.PluginPresetBase64);
+            if (restored is null)
+            {
+                AppendLog($"{savedNode.Name}: saved VST restore failed. {_engine.StatusText}");
+                continue;
+            }
+
+            ApplySavedNodeVisualState(restored, savedNode);
+            if (HasSavedPluginData(restored))
+            {
+                _pluginNodesPendingSavedDataApply.Add(restored.Slot);
+            }
+
+            VerifyRestoredPluginState(restored, savedNode);
+            if (restored.Bypassed)
+            {
+                _engine.SetPluginNodeBypassed(restored.Slot, true);
+            }
+
+            slotMap[savedNode.Slot] = restored;
+            restoredNodes.Add(restored);
+        }
+
+        _savedPluginNodesRestored = true;
+        if (restoredNodes.Count == 0)
+        {
+            AppendLog("Saved VST graph was not restored because no saved VST nodes could be loaded.");
+            return;
+        }
+
+        _settings.PluginNodes = restoredNodes;
+        RemapPluginGroups(slotMap);
+        _settings.CanvasConnections = [];
+        var connectionKeys = new HashSet<string>(StringComparer.Ordinal);
+        var restoredConnections = 0;
+        foreach (var connection in savedConnections)
+        {
+            if (TryRestoreSavedCanvasConnection(connection, slotMap, connectionKeys))
+            {
+                restoredConnections++;
+            }
+        }
+
+        if (oldSelectedSlot.HasValue && slotMap.TryGetValue(oldSelectedSlot.Value, out var selectedNode))
+        {
+            _selectedPluginNodeSlot = selectedNode.Slot;
+        }
+        else if (_selectedPluginNodeSlot.HasValue &&
+                 _settings.PluginNodes.All(node => node.Slot != _selectedPluginNodeSlot.Value))
+        {
+            _selectedPluginNodeSlot = null;
+        }
+
+        AppendLog($"Restored {restoredNodes.Count} VST node(s) and {restoredConnections} cable(s).");
+        RefreshEngineCallbackMode();
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueDelayedPluginStateReapply(restoredNodes);
+        QueueSave();
+    }
+
+    private void VerifyRestoredPluginState(PluginNodeSnapshot restored, PluginNodeSnapshot savedNode)
+    {
+        if (!HasSavedPluginData(savedNode))
+        {
+            return;
+        }
+
+        var stateVerified = string.IsNullOrWhiteSpace(savedNode.PluginStateBase64);
+        var presetVerified = string.IsNullOrWhiteSpace(savedNode.PluginPresetBase64);
+        var appliedState = string.Empty;
+        var appliedPreset = string.Empty;
+
+        if (!stateVerified && _engine.TryGetPluginNodeState(restored.Slot, out appliedState))
+        {
+            stateVerified = string.Equals(appliedState, savedNode.PluginStateBase64, StringComparison.Ordinal);
+        }
+
+        if (!presetVerified && _engine.TryGetPluginNodePreset(restored.Slot, out appliedPreset))
+        {
+            presetVerified = string.Equals(appliedPreset, savedNode.PluginPresetBase64, StringComparison.Ordinal);
+        }
+
+        if (stateVerified && presetVerified && string.IsNullOrWhiteSpace(savedNode.PluginParameterStateBase64))
+        {
+            return;
+        }
+
+        if (ApplySavedPluginNodeData(restored, savedNode))
+        {
+            AppendLog($"{savedNode.Name}: saved VST data restored on retry ({savedNode.PluginStateBase64.Length:n0} state chars, {savedNode.PluginPresetBase64.Length:n0} preset chars, {savedNode.PluginParameterStateBase64.Length:n0} parameter chars).");
+            return;
+        }
+
+        stateVerified = string.IsNullOrWhiteSpace(savedNode.PluginStateBase64) ||
+                        (_engine.TryGetPluginNodeState(restored.Slot, out appliedState) &&
+                         string.Equals(appliedState, savedNode.PluginStateBase64, StringComparison.Ordinal));
+        presetVerified = string.IsNullOrWhiteSpace(savedNode.PluginPresetBase64) ||
+                         (_engine.TryGetPluginNodePreset(restored.Slot, out appliedPreset) &&
+                          string.Equals(appliedPreset, savedNode.PluginPresetBase64, StringComparison.Ordinal));
+        AppendLog($"{savedNode.Name}: saved VST data did not verify after restore ({savedNode.PluginStateBase64.Length:n0}/{appliedState.Length:n0} state chars, {savedNode.PluginPresetBase64.Length:n0}/{appliedPreset.Length:n0} preset chars, {savedNode.PluginParameterStateBase64.Length:n0} parameter chars).");
+    }
+
+    private static bool HasSavedPluginData(PluginNodeSnapshot node)
+    {
+        return !string.IsNullOrWhiteSpace(node.PluginStateBase64) ||
+               !string.IsNullOrWhiteSpace(node.PluginPresetBase64) ||
+               !string.IsNullOrWhiteSpace(node.PluginParameterStateBase64);
+    }
+
+    private bool ApplySavedPluginNodeData(PluginNodeSnapshot node, PluginNodeSnapshot savedNode)
+    {
+        if (!HasSavedPluginData(savedNode))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(savedNode.PluginPresetBase64))
+        {
+            _engine.SetPluginNodePreset(node.Slot, savedNode.PluginPresetBase64);
+            node.PluginPresetBase64 = savedNode.PluginPresetBase64;
+        }
+
+        if (!string.IsNullOrWhiteSpace(savedNode.PluginStateBase64))
+        {
+            _engine.SetPluginNodeState(node.Slot, savedNode.PluginStateBase64);
+            node.PluginStateBase64 = savedNode.PluginStateBase64;
+        }
+
+        if (!string.IsNullOrWhiteSpace(savedNode.PluginParameterStateBase64))
+        {
+            _engine.SetPluginNodeParameterState(node.Slot, savedNode.PluginParameterStateBase64);
+            node.PluginParameterStateBase64 = savedNode.PluginParameterStateBase64;
+        }
+
+        var stateVerified = string.IsNullOrWhiteSpace(savedNode.PluginStateBase64) ||
+                            (_engine.TryGetPluginNodeState(node.Slot, out var appliedState) &&
+                             string.Equals(appliedState, savedNode.PluginStateBase64, StringComparison.Ordinal));
+        var presetVerified = string.IsNullOrWhiteSpace(savedNode.PluginPresetBase64) ||
+                             (_engine.TryGetPluginNodePreset(node.Slot, out var appliedPreset) &&
+                              string.Equals(appliedPreset, savedNode.PluginPresetBase64, StringComparison.Ordinal));
+        return stateVerified && presetVerified;
+    }
+
+    private async void QueueDelayedPluginStateReapply(IReadOnlyList<PluginNodeSnapshot> restoredNodes)
+    {
+        var slots = restoredNodes
+            .Where(HasSavedPluginData)
+            .Select(static node => node.Slot)
+            .ToArray();
+        if (slots.Length == 0)
+        {
+            return;
+        }
+
+        await Task.Delay(300);
+        ReapplySavedPluginDataBySlot(slots);
+        await Task.Delay(900);
+        ReapplySavedPluginDataBySlot(slots);
+    }
+
+    private void ReapplySavedPluginDataBySlot(IReadOnlyCollection<int> slots)
+    {
+        foreach (var slot in slots)
+        {
+            var node = _settings.PluginNodes.FirstOrDefault(candidate => candidate.Slot == slot);
+            if (node is not null && HasSavedPluginData(node))
+            {
+                ApplySavedPluginNodeData(node, node);
+            }
+        }
+    }
+
+    private static PluginChoice? SavedPluginChoice(PluginNodeSnapshot savedNode, IReadOnlyList<PluginChoice> choices)
+    {
+        var savedBaseName = PluginDisplayBaseName(savedNode.Name);
+        var byIndexAndName = choices.FirstOrDefault(choice =>
+            choice.Index == savedNode.PluginIndex &&
+            PluginDisplayBaseName(choice.Name).Equals(savedBaseName, StringComparison.OrdinalIgnoreCase));
+        if (byIndexAndName is not null)
+        {
+            return byIndexAndName;
+        }
+
+        var byName = choices.FirstOrDefault(choice =>
+            PluginDisplayBaseName(choice.Name).Equals(savedBaseName, StringComparison.OrdinalIgnoreCase));
+        if (byName is not null)
+        {
+            return byName;
+        }
+
+        return savedNode.PluginIndex >= 0
+            ? choices.FirstOrDefault(choice => choice.Index == savedNode.PluginIndex)
+            : null;
+    }
+
+    private static void ApplySavedNodeVisualState(PluginNodeSnapshot restored, PluginNodeSnapshot saved)
+    {
+        restored.Name = string.IsNullOrWhiteSpace(saved.Name) ? restored.Name : saved.Name;
+        restored.X = saved.X;
+        restored.Y = saved.Y;
+        restored.Mode = saved.Mode == CallbackMode.None ? CallbackMode.Input : saved.Mode;
+        restored.Bypassed = saved.Bypassed;
+        restored.PinsCollapsed = saved.PinsCollapsed;
+        restored.PluginStateBase64 = saved.PluginStateBase64;
+        restored.PluginPresetBase64 = saved.PluginPresetBase64;
+        restored.PluginParameterStateBase64 = saved.PluginParameterStateBase64;
+
+        var sidechainPins = Math.Clamp(saved.SidechainInputPins, 0, Math.Max(0, restored.InputPins - 1));
+        var mainPins = Math.Clamp(saved.MainInputPins, 1, Math.Max(1, restored.InputPins - sidechainPins));
+        restored.SidechainInputPins = sidechainPins;
+        restored.MainInputPins = mainPins;
+        restored.OutputPins = Math.Max(1, restored.OutputPins);
+    }
+
+    private void RemapPluginGroups(IReadOnlyDictionary<int, PluginNodeSnapshot> slotMap)
+    {
+        foreach (var group in _settings.PluginGroups)
+        {
+            group.MemberSlots = group.MemberSlots
+                .Select(slot => slotMap.TryGetValue(slot, out var restoredNode) ? restoredNode.Slot : -1)
+                .Where(static slot => slot >= 0)
+                .Distinct()
+                .ToList();
+
+            if (group.MemberSlots.Count > 0)
+            {
+                group.Mode = _settings.PluginNodes.First(node => node.Slot == group.MemberSlots[0]).Mode;
+            }
+        }
+
+        NormalizePluginGroups();
+    }
+
+    private bool TryRestoreSavedCanvasConnection(
+        CanvasConnectionSnapshot savedConnection,
+        IReadOnlyDictionary<int, PluginNodeSnapshot> slotMap,
+        ISet<string> connectionKeys)
+    {
+        var connection = CloneConnection(savedConnection);
+        switch (connection.Kind)
+        {
+            case ConnectionEndpointToEndpoint:
+                return AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionEndpointToNode:
+                if (!slotMap.TryGetValue(connection.ToSlot, out var endpointTarget) ||
+                    connection.FromChannel < 0 ||
+                    !IsValidNodeInputVisualPin(endpointTarget, connection.ToPin))
+                {
+                    return false;
+                }
+
+                connection.ToSlot = endpointTarget.Slot;
+                connection.ToMode = endpointTarget.Mode;
+                connection.To = NodeInputKey(endpointTarget.Slot, connection.ToPin);
+                var endpointNativePin = NativeInputPinForVisualPin(endpointTarget, connection.ToPin);
+                return endpointNativePin >= 0 &&
+                       _engine.TogglePluginInputRoute(endpointTarget.Slot, connection.FromChannel, endpointNativePin) &&
+                       AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionNodeToEndpoint:
+                if (!slotMap.TryGetValue(connection.FromSlot, out var endpointSource) ||
+                    !IsValidNodeOutputPin(endpointSource, connection.FromPin) ||
+                    connection.ToChannel < 0)
+                {
+                    return false;
+                }
+
+                connection.FromSlot = endpointSource.Slot;
+                connection.FromMode = endpointSource.Mode;
+                connection.From = NodeOutputKey(endpointSource.Slot, connection.FromPin);
+                return _engine.TogglePluginOutputRoute(endpointSource.Slot, connection.FromPin, connection.ToChannel) &&
+                       AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionNodeToNode:
+                if (!slotMap.TryGetValue(connection.FromSlot, out var moduleSource) ||
+                    !slotMap.TryGetValue(connection.ToSlot, out var moduleTarget) ||
+                    !IsValidNodeOutputPin(moduleSource, connection.FromPin) ||
+                    !IsValidNodeInputVisualPin(moduleTarget, connection.ToPin))
+                {
+                    return false;
+                }
+
+                connection.FromSlot = moduleSource.Slot;
+                connection.FromMode = moduleSource.Mode;
+                connection.From = NodeOutputKey(moduleSource.Slot, connection.FromPin);
+                connection.ToSlot = moduleTarget.Slot;
+                connection.ToMode = moduleTarget.Mode;
+                connection.To = NodeInputKey(moduleTarget.Slot, connection.ToPin);
+                var moduleNativePin = NativeInputPinForVisualPin(moduleTarget, connection.ToPin);
+                return moduleNativePin >= 0 &&
+                       _engine.TogglePluginModuleRoute(moduleSource.Slot, connection.FromPin, moduleTarget.Slot, moduleNativePin) &&
+                       AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionGroupInputToNode:
+                if (!slotMap.TryGetValue(connection.ToSlot, out var groupInputTarget) ||
+                    !_settings.PluginGroups.Any(group => group.Id == connection.FromGroupId) ||
+                    !IsValidNodeInputVisualPin(groupInputTarget, connection.ToPin))
+                {
+                    return false;
+                }
+
+                connection.ToSlot = groupInputTarget.Slot;
+                connection.ToMode = groupInputTarget.Mode;
+                connection.To = NodeInputKey(groupInputTarget.Slot, connection.ToPin);
+                return AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionNodeToGroupOutput:
+                if (!slotMap.TryGetValue(connection.FromSlot, out var groupOutputSource) ||
+                    !_settings.PluginGroups.Any(group => group.Id == connection.ToGroupId) ||
+                    !IsValidNodeOutputPin(groupOutputSource, connection.FromPin))
+                {
+                    return false;
+                }
+
+                connection.FromSlot = groupOutputSource.Slot;
+                connection.FromMode = groupOutputSource.Mode;
+                connection.From = NodeOutputKey(groupOutputSource.Slot, connection.FromPin);
+                return AddRestoredCanvasConnection(connection, connectionKeys);
+
+            default:
+                return false;
+        }
+    }
+
+    private bool AddRestoredCanvasConnection(CanvasConnectionSnapshot connection, ISet<string> connectionKeys)
+    {
+        if (!connectionKeys.Add(CanvasConnectionKey(connection)))
+        {
+            return false;
+        }
+
+        _settings.CanvasConnections.Add(connection);
+        return true;
+    }
+
+    private static bool IsValidNodeInputVisualPin(PluginNodeSnapshot node, int pin)
+    {
+        return pin >= 0 && pin < NodeInputVisualPinCount(node);
+    }
+
+    private static bool IsValidNodeOutputPin(PluginNodeSnapshot node, int pin)
+    {
+        return pin >= 0 && pin < node.OutputPins;
+    }
+
+    private static PluginNodeSnapshot ClonePluginNodeSnapshot(PluginNodeSnapshot node)
+    {
+        return new PluginNodeSnapshot
+        {
+            Name = node.Name,
+            PluginIndex = node.PluginIndex,
+            PluginStateBase64 = node.PluginStateBase64,
+            PluginPresetBase64 = node.PluginPresetBase64,
+            PluginParameterStateBase64 = node.PluginParameterStateBase64,
+            Slot = node.Slot,
+            X = node.X,
+            Y = node.Y,
+            MainInputPins = node.MainInputPins,
+            SidechainInputPins = node.SidechainInputPins,
+            InputPins = node.InputPins,
+            OutputPins = node.OutputPins,
+            Bypassed = node.Bypassed,
+            PinsCollapsed = node.PinsCollapsed,
+            Mode = node.Mode
+        };
     }
 
     private void SelectPluginNode(int slot, bool rebuildCanvas)
@@ -4068,7 +5041,7 @@ public partial class MainWindow : Window
                 Margin = new Thickness(8, 0, 0, 0),
                 Style = (Style)FindResource("RouteButton")
             };
-            open.Click += (_, _) => AppendLog(_engine.OpenPluginEditor(node.Slot));
+            open.Click += (_, _) => OpenPluginEditorWithSavedData(node);
             Grid.SetColumn(open, 2);
             grid.Children.Add(open);
 
@@ -4095,6 +5068,33 @@ public partial class MainWindow : Window
         QueueSave();
     }
 
+    private async void OpenPluginEditorWithSavedData(PluginNodeSnapshot node)
+    {
+        var shouldApplySavedData = _pluginNodesPendingSavedDataApply.Contains(node.Slot) && HasSavedPluginData(node);
+        if (shouldApplySavedData)
+        {
+            ApplySavedPluginNodeData(node, node);
+        }
+
+        AppendLog(_engine.OpenPluginEditor(node.Slot));
+
+        if (!shouldApplySavedData)
+        {
+            return;
+        }
+
+        await Task.Delay(200);
+        var currentNode = _settings.PluginNodes.FirstOrDefault(candidate => candidate.Slot == node.Slot);
+        if (currentNode is null)
+        {
+            return;
+        }
+
+        ApplySavedPluginNodeData(currentNode, currentNode);
+        _pluginNodesPendingSavedDataApply.Remove(node.Slot);
+        AppendLog($"{currentNode.Name}: saved VST data was re-applied after opening the editor.");
+    }
+
     private void SetNodePinsCollapsed(PluginNodeSnapshot node, bool collapsed)
     {
         node.PinsCollapsed = collapsed;
@@ -4106,6 +5106,7 @@ public partial class MainWindow : Window
     private void RemovePluginNode(PluginNodeSnapshot node)
     {
         _engine.RemovePluginNode(node.Slot);
+        _pluginNodesPendingSavedDataApply.Remove(node.Slot);
         _settings.PluginNodes.Remove(node);
         _settings.CanvasConnections.RemoveAll(connection => connection.FromSlot == node.Slot || connection.ToSlot == node.Slot);
         foreach (var group in _settings.PluginGroups.ToArray())
@@ -4641,11 +5642,14 @@ public partial class MainWindow : Window
             CornerRadius = new CornerRadius(6),
             Padding = new Thickness(10, 8, 10, 8),
             Tag = group,
-            ContextMenu = BuildGroupContextMenu(group)
+            ContextMenu = BuildGroupContextMenu(group),
+            AllowDrop = true
         };
         border.MouseLeftButtonDown += Group_MouseLeftButtonDown;
         border.MouseMove += Group_MouseMove;
         border.MouseLeftButtonUp += Group_MouseLeftButtonUp;
+        border.DragOver += Group_DragOver;
+        border.Drop += Group_Drop;
         Canvas.SetLeft(border, group.X);
         Canvas.SetTop(border, group.Y);
         RoutingCanvas.Children.Add(border);
@@ -4994,6 +5998,122 @@ public partial class MainWindow : Window
         return $"{baseName} {Guid.NewGuid():N}";
     }
 
+    private string UniquePluginNodeName(string name, int? excludingSlot = null)
+    {
+        var parts = SplitPluginDisplayName(name);
+        var baseName = FormatPluginDisplayName(parts);
+
+        var names = _settings.PluginNodes
+            .Where(node => excludingSlot is null || node.Slot != excludingSlot.Value)
+            .Select(static node => NormalizePluginDisplayName(node.Name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!names.Contains(baseName))
+        {
+            return baseName;
+        }
+
+        for (var index = 2; index < 1000; index++)
+        {
+            var candidate = FormatPluginDisplayName(parts, index);
+            if (!names.Contains(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return FormatPluginDisplayName(parts, null, Guid.NewGuid().ToString("N"));
+    }
+
+    private static string PluginDisplayBaseName(string name)
+    {
+        return FormatPluginDisplayName(SplitPluginDisplayName(name));
+    }
+
+    private static string NormalizePluginDisplayName(string name)
+    {
+        var duplicateIndex = PluginDisplayDuplicateIndex(name);
+        return FormatPluginDisplayName(SplitPluginDisplayName(name), duplicateIndex > 1 ? duplicateIndex : null);
+    }
+
+    private static PluginDisplayNameParts SplitPluginDisplayName(string name)
+    {
+        var trimmed = string.IsNullOrWhiteSpace(name) ? "VST" : name.Trim();
+        if (TryStripTrailingDuplicateMarker(trimmed, out var oldStyleBaseName, out _))
+        {
+            trimmed = oldStyleBaseName;
+        }
+
+        var suffixStart = trimmed.IndexOf(" - ", StringComparison.Ordinal);
+        if (suffixStart <= 0 && trimmed.EndsWith(']'))
+        {
+            suffixStart = trimmed.LastIndexOf(" [", StringComparison.Ordinal);
+        }
+
+        var product = suffixStart > 0 ? trimmed[..suffixStart].Trim() : trimmed;
+        var suffix = suffixStart > 0 ? trimmed[suffixStart..].TrimEnd() : string.Empty;
+
+        if (TryStripTrailingDuplicateMarker(product, out var productBaseName, out _))
+        {
+            product = productBaseName;
+        }
+
+        if (string.IsNullOrWhiteSpace(product))
+        {
+            product = "VST";
+        }
+
+        return new PluginDisplayNameParts(product, suffix);
+    }
+
+    private static int PluginDisplayDuplicateIndex(string name)
+    {
+        var trimmed = string.IsNullOrWhiteSpace(name) ? "VST" : name.Trim();
+        if (TryStripTrailingDuplicateMarker(trimmed, out _, out var oldStyleIndex))
+        {
+            return oldStyleIndex;
+        }
+
+        var suffixStart = trimmed.IndexOf(" - ", StringComparison.Ordinal);
+        if (suffixStart <= 0 && trimmed.EndsWith(']'))
+        {
+            suffixStart = trimmed.LastIndexOf(" [", StringComparison.Ordinal);
+        }
+
+        var product = suffixStart > 0 ? trimmed[..suffixStart].Trim() : trimmed;
+        return TryStripTrailingDuplicateMarker(product, out _, out var productIndex) ? productIndex : 1;
+    }
+
+    private static string FormatPluginDisplayName(PluginDisplayNameParts parts, int? duplicateIndex = null, string? fallbackId = null)
+    {
+        var product = string.IsNullOrWhiteSpace(parts.Product) ? "VST" : parts.Product.Trim();
+        var duplicate = duplicateIndex is > 1
+            ? $" ({duplicateIndex.Value})"
+            : !string.IsNullOrWhiteSpace(fallbackId) ? $" ({fallbackId})" : string.Empty;
+        var suffix = string.IsNullOrWhiteSpace(parts.Suffix) ? string.Empty : $" {parts.Suffix.Trim()}";
+        return $"{product}{duplicate}{suffix}".Trim();
+    }
+
+    private static bool TryStripTrailingDuplicateMarker(string text, out string baseName, out int duplicateIndex)
+    {
+        baseName = text.Trim();
+        duplicateIndex = 1;
+
+        var trimmed = baseName;
+        var close = trimmed.LastIndexOf(')');
+        var open = trimmed.LastIndexOf(" (", StringComparison.Ordinal);
+        if (close == trimmed.Length - 1 &&
+            open > 0 &&
+            int.TryParse(trimmed[(open + 2)..close], out var parsedIndex) &&
+            parsedIndex > 1)
+        {
+            baseName = trimmed[..open].Trim();
+            duplicateIndex = parsedIndex;
+            return true;
+        }
+
+        return false;
+    }
+
     private PluginGroupSnapshot? GroupForNode(int slot)
     {
         return _settings.PluginGroups.FirstOrDefault(group => group.MemberSlots.Contains(slot));
@@ -5259,7 +6379,7 @@ public partial class MainWindow : Window
     private ContextMenu BuildNodeContextMenu(PluginNodeSnapshot node)
     {
         var menu = new ContextMenu();
-        menu.Items.Add(CreateNodeMenuItem("Open Editor", () => AppendLog(_engine.OpenPluginEditor(node.Slot))));
+        menu.Items.Add(CreateNodeMenuItem("Open Editor", () => OpenPluginEditorWithSavedData(node)));
         menu.Items.Add(CreateNodeMenuItem(node.Bypassed ? "Enable" : "Bypass", () => SetNodeBypass(node, !node.Bypassed)));
         menu.Items.Add(new Separator());
         menu.Items.Add(CreateNodeMenuItem("Properties", () => ShowNodeProperties(node)));
@@ -5357,6 +6477,8 @@ public partial class MainWindow : Window
             return;
         }
 
+        PlaceUngroupedMembersNearGroup(group, [node]);
+        DisconnectGroupMemberInternalConnections(group, node);
         group.MemberSlots.Remove(node.Slot);
         AppendLog($"Removed {node.Name} from {group.Name}.");
         RefreshEngineCallbackMode();
@@ -5401,7 +6523,9 @@ public partial class MainWindow : Window
             GroupMembers(group).ToList(),
             _settings.CanvasConnections,
             (sourceSlot, sourcePin, destinationSlot, nativeDestinationPin) =>
-                _engine.TogglePluginModuleRoute(sourceSlot, sourcePin, destinationSlot, nativeDestinationPin))
+                _engine.TogglePluginModuleRoute(sourceSlot, sourcePin, destinationSlot, nativeDestinationPin),
+            RemovePluginNode,
+            OpenPluginEditorWithSavedData)
         {
             Owner = this
         };
@@ -5439,6 +6563,9 @@ public partial class MainWindow : Window
 
     private void RemovePluginGroup(PluginGroupSnapshot group)
     {
+        var members = GroupMembers(group).ToList();
+        PlaceUngroupedMembersNearGroup(group, members);
+        RemoveGroupPortMappings(group);
         _settings.PluginGroups.Remove(group);
         if (_selectedPluginGroupId == group.Id)
         {
@@ -5451,8 +6578,100 @@ public partial class MainWindow : Window
         QueueSave();
     }
 
+    private void DeletePluginGroupWithMembers(PluginGroupSnapshot group)
+    {
+        var members = GroupMembers(group).ToList();
+        var memberSlots = members.Select(static node => node.Slot).ToHashSet();
+
+        foreach (var member in members)
+        {
+            _engine.RemovePluginNode(member.Slot);
+            _pluginNodesPendingSavedDataApply.Remove(member.Slot);
+        }
+
+        _settings.CanvasConnections.RemoveAll(connection =>
+            memberSlots.Contains(connection.FromSlot) ||
+            memberSlots.Contains(connection.ToSlot) ||
+            (connection.Kind == ConnectionGroupInputToNode && connection.FromGroupId == group.Id) ||
+            (connection.Kind == ConnectionNodeToGroupOutput && connection.ToGroupId == group.Id));
+        _settings.PluginNodes.RemoveAll(node => memberSlots.Contains(node.Slot));
+        foreach (var existingGroup in _settings.PluginGroups)
+        {
+            existingGroup.MemberSlots.RemoveAll(memberSlots.Contains);
+        }
+
+        _settings.PluginGroups.Remove(group);
+        if (_selectedPluginGroupId == group.Id)
+        {
+            _selectedPluginGroupId = null;
+        }
+
+        if (_selectedPluginNodeSlot is { } selectedSlot && memberSlots.Contains(selectedSlot))
+        {
+            _selectedPluginNodeSlot = null;
+        }
+
+        AppendLog($"Deleted VST group and {members.Count} VST node(s): {group.Name}.");
+        RefreshEngineCallbackMode();
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private void PlaceUngroupedMembersNearGroup(PluginGroupSnapshot group, IReadOnlyList<PluginNodeSnapshot> members)
+    {
+        if (members.Count == 0)
+        {
+            return;
+        }
+
+        var minX = (int)(VstCanvasWallMargin + VstEndpointCardWidth + 48);
+        var maxX = (int)Math.Max(minX, RoutingCanvas.Width - VstEndpointCardWidth - VstNodeWidth - (VstCanvasWallMargin * 2));
+        var baseX = Math.Clamp(group.X + 24, minX, maxX);
+        var baseY = Math.Max(56, group.Y);
+
+        for (var index = 0; index < members.Count; index++)
+        {
+            var node = members[index];
+            node.X = Math.Clamp(baseX + ((index % 3) * (int)(VstNodeWidth + 34)), minX, maxX);
+            node.Y = Math.Max(56, baseY + ((index / 3) * 128));
+        }
+    }
+
+    private void DisconnectGroupMemberInternalConnections(PluginGroupSnapshot group, PluginNodeSnapshot node)
+    {
+        var groupSlots = group.MemberSlots.ToHashSet();
+        var connections = _settings.CanvasConnections
+            .Where(connection =>
+                (connection.Kind == ConnectionGroupInputToNode &&
+                 connection.FromGroupId == group.Id &&
+                 connection.ToSlot == node.Slot) ||
+                (connection.Kind == ConnectionNodeToGroupOutput &&
+                 connection.ToGroupId == group.Id &&
+                 connection.FromSlot == node.Slot) ||
+                (connection.Kind == ConnectionNodeToNode &&
+                 ((connection.FromSlot == node.Slot && groupSlots.Contains(connection.ToSlot)) ||
+                  (connection.ToSlot == node.Slot && groupSlots.Contains(connection.FromSlot)))))
+            .ToList();
+
+        foreach (var connection in connections)
+        {
+            DisconnectCanvasConnectionCore(connection);
+        }
+    }
+
+    private void RemoveGroupPortMappings(PluginGroupSnapshot group)
+    {
+        _settings.CanvasConnections.RemoveAll(connection =>
+            (connection.Kind == ConnectionGroupInputToNode &&
+             connection.FromGroupId == group.Id) ||
+            (connection.Kind == ConnectionNodeToGroupOutput &&
+             connection.ToGroupId == group.Id));
+    }
+
     private void CopyPluginGroup(PluginGroupSnapshot group)
     {
+        CapturePluginNodeStates();
         var members = GroupMembers(group).ToList();
         var slotMap = new Dictionary<int, PluginNodeSnapshot>();
         var copiedGroup = new PluginGroupSnapshot
@@ -5485,13 +6704,20 @@ public partial class MainWindow : Window
                 member.SidechainInputPins,
                 member.OutputPins,
                 member.X + 28,
-                member.Y + 28);
+                member.Y + 28,
+                member.PluginStateBase64,
+                member.PluginPresetBase64);
             if (copy is null)
             {
                 AppendLog(_engine.StatusText);
                 continue;
             }
 
+            copy.Name = UniquePluginNodeName(member.Name);
+            copy.PluginStateBase64 = member.PluginStateBase64;
+            copy.PluginPresetBase64 = member.PluginPresetBase64;
+            copy.PluginParameterStateBase64 = member.PluginParameterStateBase64;
+            VerifyRestoredPluginState(copy, member);
             copy.Bypassed = member.Bypassed;
             copy.PinsCollapsed = member.PinsCollapsed;
             if (copy.Bypassed)
@@ -5653,6 +6879,25 @@ public partial class MainWindow : Window
         }
 
         var wasBypassed = node.Bypassed;
+        var hadPendingSavedDataApply = _pluginNodesPendingSavedDataApply.Remove(node.Slot);
+        var savedState = _engine.GetPluginNodeState(node.Slot);
+        if (!string.IsNullOrWhiteSpace(savedState))
+        {
+            node.PluginStateBase64 = savedState;
+        }
+
+        var savedPreset = _engine.GetPluginNodePreset(node.Slot);
+        if (!string.IsNullOrWhiteSpace(savedPreset))
+        {
+            node.PluginPresetBase64 = savedPreset;
+        }
+
+        var savedParameterState = _engine.GetPluginNodeParameterState(node.Slot);
+        if (!string.IsNullOrWhiteSpace(savedParameterState))
+        {
+            node.PluginParameterStateBase64 = savedParameterState;
+        }
+
         var oldSlot = node.Slot;
         var oldMainInputPins = node.MainInputPins;
         var oldSidechainInputPins = node.SidechainInputPins;
@@ -5671,7 +6916,9 @@ public partial class MainWindow : Window
             safeSidechainInputs,
             safeOutputs,
             node.X,
-            node.Y);
+            node.Y,
+            node.PluginStateBase64,
+            node.PluginPresetBase64);
 
         if (replacement is null)
         {
@@ -5686,6 +6933,12 @@ public partial class MainWindow : Window
         node.MainInputPins = Math.Clamp(safeMainInputs, 1, node.InputPins);
         node.SidechainInputPins = Math.Min(safeSidechainInputs, Math.Max(0, node.InputPins - node.MainInputPins));
         node.Bypassed = wasBypassed;
+        if (hadPendingSavedDataApply && HasSavedPluginData(node))
+        {
+            _pluginNodesPendingSavedDataApply.Add(node.Slot);
+        }
+
+        VerifyRestoredPluginState(node, node);
         _selectedPluginNodeSlot = node.Slot;
         foreach (var group in _settings.PluginGroups)
         {
@@ -7146,7 +8399,41 @@ public partial class MainWindow : Window
         return false;
     }
 
+    private bool DeleteSelectedVstCanvasItem()
+    {
+        if (_workspaceView != WorkspaceView.Vst)
+        {
+            return false;
+        }
+
+        if (_selectedPluginNodeSlot is { } nodeSlot &&
+            _settings.PluginNodes.FirstOrDefault(node => node.Slot == nodeSlot) is { } node)
+        {
+            RemovePluginNode(node);
+            return true;
+        }
+
+        if (_selectedPluginGroupId is { Length: > 0 } groupId &&
+            _settings.PluginGroups.FirstOrDefault(group => group.Id == groupId) is { } group)
+        {
+            DeletePluginGroupWithMembers(group);
+            return true;
+        }
+
+        return false;
+    }
+
     private void DisconnectCanvasConnection(CanvasConnectionSnapshot connection)
+    {
+        DisconnectCanvasConnectionCore(connection);
+        AppendLog($"Disconnected {CanvasConnectionLabel(connection)}.");
+        RefreshEngineCallbackMode();
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private bool DisconnectCanvasConnectionCore(CanvasConnectionSnapshot connection)
     {
         switch (connection.Kind)
         {
@@ -7175,13 +8462,9 @@ public partial class MainWindow : Window
             break;
         }
 
-        _settings.CanvasConnections.Remove(connection);
+        var removed = _settings.CanvasConnections.Remove(connection);
         _selectedCanvasConnectionKey = null;
-        AppendLog($"Disconnected {CanvasConnectionLabel(connection)}.");
-        RefreshEngineCallbackMode();
-        RebuildVstNodeList();
-        RebuildRoutingCanvas();
-        QueueSave();
+        return removed;
     }
 
     private bool DisconnectCrossRouteConnection(CrossRouteConnectionInfo info)
@@ -7307,6 +8590,7 @@ public partial class MainWindow : Window
     private PluginNodeSnapshot? _draggingNode;
     private PluginGroupSnapshot? _draggingGroup;
     private Point _dragOffset;
+    private bool _nodeDragMoved;
 
     private void Group_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -7343,7 +8627,15 @@ public partial class MainWindow : Window
         var maxX = (int)Math.Max(minX, RoutingCanvas.Width - VstEndpointCardWidth - VstGroupWidth - (VstCanvasWallMargin * 2));
         _draggingGroup.X = Math.Clamp((int)(point.X - _dragOffset.X), minX, maxX);
         _draggingGroup.Y = Math.Max(30, (int)(point.Y - _dragOffset.Y));
-        MoveDragElements(_draggingGroup.X - _dragElementOrigins.Values.Min(static point => point.X), _draggingGroup.Y - _dragElementOrigins.Values.Min(static point => point.Y));
+        if (!TryGetDragOriginMinimum(out var origin))
+        {
+            e.Handled = true;
+            return;
+        }
+
+        MoveDragElements(
+            _draggingGroup.X - origin.X - DragPreviewXCorrection,
+            _draggingGroup.Y - origin.Y);
         e.Handled = true;
     }
 
@@ -7368,8 +8660,17 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (e.ClickCount > 1)
+        {
+            SelectPluginNode(node.Slot, rebuildCanvas: false);
+            OpenPluginEditorWithSavedData(node);
+            e.Handled = true;
+            return;
+        }
+
         SelectPluginNode(node.Slot, rebuildCanvas: false);
         _draggingNode = node;
+        _nodeDragMoved = false;
         var point = e.GetPosition(RoutingCanvas);
         _dragOffset = new Point(point.X - node.X, point.Y - node.Y);
         CaptureDragOrigins(_nodeVisualElements.TryGetValue(node.Slot, out var elements) ? elements : [border]);
@@ -7389,7 +8690,16 @@ public partial class MainWindow : Window
         var maxX = (int)Math.Max(minX, RoutingCanvas.Width - VstEndpointCardWidth - VstNodeWidth - (VstCanvasWallMargin * 2));
         _draggingNode.X = Math.Clamp((int)(point.X - _dragOffset.X), minX, maxX);
         _draggingNode.Y = Math.Max(30, (int)(point.Y - _dragOffset.Y));
-        MoveDragElements(_draggingNode.X - _dragElementOrigins.Values.Min(static point => point.X), _draggingNode.Y - _dragElementOrigins.Values.Min(static point => point.Y));
+        _nodeDragMoved = true;
+        if (!TryGetDragOriginMinimum(out var origin))
+        {
+            e.Handled = true;
+            return;
+        }
+
+        MoveDragElements(
+            _draggingNode.X - origin.X - DragPreviewXCorrection,
+            _draggingNode.Y - origin.Y);
         e.Handled = true;
     }
 
@@ -7400,17 +8710,122 @@ public partial class MainWindow : Window
             border.ReleaseMouseCapture();
         }
 
+        var droppedNode = _draggingNode;
+        var dropPoint = e.GetPosition(RoutingCanvas);
         _draggingNode = null;
         _dragElementOrigins.Clear();
+        if (droppedNode is not null &&
+            _nodeDragMoved &&
+            GroupForNode(droppedNode.Slot) is null &&
+            GroupAtPoint(dropPoint, droppedNode.Mode) is { } targetGroup)
+        {
+            _nodeDragMoved = false;
+            AddNodeToGroup(droppedNode, targetGroup);
+            e.Handled = true;
+            return;
+        }
+
+        if (droppedNode is not null &&
+            _nodeDragMoved &&
+            GroupForNode(droppedNode.Slot) is null &&
+            NodeAtPoint(dropPoint, droppedNode) is { } targetNode)
+        {
+            _nodeDragMoved = false;
+            var result = MessageBox.Show(
+                this,
+                $"Create a VST group from:\n\n{targetNode.Name}\n{droppedNode.Name}",
+                "Create VST Group",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (result == MessageBoxResult.Yes)
+            {
+                CreatePluginGroupFromNodes(targetNode, droppedNode);
+                e.Handled = true;
+                return;
+            }
+        }
+
+        _nodeDragMoved = false;
         RebuildRoutingCanvas();
         QueueSave();
         e.Handled = true;
+    }
+
+    private PluginGroupSnapshot? GroupAtPoint(Point point, CallbackMode mode)
+    {
+        return _settings.PluginGroups
+            .Where(group => group.Mode == mode && GroupBelongsToCurrentCanvas(group))
+            .Reverse()
+            .FirstOrDefault(group =>
+                point.X >= group.X &&
+                point.X <= group.X + VstGroupWidth &&
+                point.Y >= group.Y &&
+                point.Y <= group.Y + VstGroupHeight(group));
+    }
+
+    private PluginNodeSnapshot? NodeAtPoint(Point point, PluginNodeSnapshot droppedNode)
+    {
+        return _settings.PluginNodes
+            .Where(node =>
+                node.Slot != droppedNode.Slot &&
+                node.Mode == droppedNode.Mode &&
+                NodeBelongsToCurrentCanvas(node) &&
+                GroupForNode(node.Slot) is null)
+            .Reverse()
+            .FirstOrDefault(node =>
+                point.X >= node.X &&
+                point.X <= node.X + VstNodeWidth &&
+                point.Y >= node.Y &&
+                point.Y <= node.Y + VstNodeHeight(node));
+    }
+
+    private void CreatePluginGroupFromNodes(PluginNodeSnapshot firstNode, PluginNodeSnapshot secondNode)
+    {
+        var members = new[] { firstNode, secondNode }
+            .OrderBy(static node => node.X)
+            .ThenBy(static node => node.Y)
+            .ToList();
+        var inputNode = members.First();
+        var outputNode = members.Last();
+        var group = new PluginGroupSnapshot
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Name = UniquePluginGroupName($"{PluginDisplayBaseName(inputNode.Name)} Group"),
+            Mode = inputNode.Mode,
+            X = Math.Max(300, members.Min(static node => node.X) - 12),
+            Y = Math.Max(80, members.Min(static node => node.Y) - 12),
+            InputPins = Math.Min(2, Math.Max(1, inputNode.MainInputPins)),
+            OutputPins = Math.Min(2, Math.Max(1, outputNode.OutputPins)),
+            MemberSlots = members.Select(static node => node.Slot).Distinct().ToList()
+        };
+
+        foreach (var existingGroup in _settings.PluginGroups)
+        {
+            existingGroup.MemberSlots.RemoveAll(slot => group.MemberSlots.Contains(slot));
+        }
+
+        _settings.PluginGroups.Add(group);
+        _selectedPluginGroupId = group.Id;
+        _selectedPluginNodeSlot = null;
+        EnsureGroupInternalConnections(group);
+        AppendLog($"Created VST group: {group.Name}.");
+        RefreshEngineCallbackMode();
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
     }
 
     private void EndpointCard_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is not Border { Tag: EndpointDragInfo info } border)
         {
+            return;
+        }
+
+        if (e.ClickCount > 1)
+        {
+            ToggleCanvasEndpointPins(info.Mode, info.Endpoint);
+            e.Handled = true;
             return;
         }
 
@@ -7473,8 +8888,26 @@ public partial class MainWindow : Window
         _dragElementOrigins.Clear();
         foreach (var element in elements)
         {
-            _dragElementOrigins[element] = new Point(Canvas.GetLeft(element), Canvas.GetTop(element));
+            var left = Canvas.GetLeft(element);
+            var top = Canvas.GetTop(element);
+            _dragElementOrigins[element] = new Point(
+                double.IsNaN(left) ? 0.0 : left,
+                double.IsNaN(top) ? 0.0 : top);
         }
+    }
+
+    private bool TryGetDragOriginMinimum(out Point origin)
+    {
+        origin = default;
+        if (_dragElementOrigins.Count == 0)
+        {
+            return false;
+        }
+
+        origin = new Point(
+            _dragElementOrigins.Values.Min(static point => point.X),
+            _dragElementOrigins.Values.Min(static point => point.Y));
+        return true;
     }
 
     private void MoveDragElements(double deltaX, double deltaY)
@@ -7530,8 +8963,10 @@ public partial class MainWindow : Window
     {
         FlushQueuedChannelChanges();
         _channelApplyTimer.Stop();
+        _pluginRestoreTimer.Stop();
         _statusTimer.Stop();
         _saveTimer.Stop();
+        SaveSettings();
         _vbanTextListener?.Dispose();
         _vfxCommandsWindow?.Close();
         _engine.Dispose();

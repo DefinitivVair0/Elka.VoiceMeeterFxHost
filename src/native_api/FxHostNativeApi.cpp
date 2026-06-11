@@ -1625,7 +1625,7 @@ __declspec(dllexport) int __cdecl ElkaFx_ScanPluginFoldersEx(
     return scanPluginFoldersNative(folders, includeDefaults, formatFlags, status, statusChars);
 }
 
-__declspec(dllexport) int __cdecl ElkaFx_AddPluginNode(
+int addPluginNodeNative(
     int pluginIndex,
     int mode,
     int mainInputPins,
@@ -1633,6 +1633,8 @@ __declspec(dllexport) int __cdecl ElkaFx_AddPluginNode(
     int outputPins,
     int x,
     int y,
+    const wchar_t* initialStateBase64,
+    const wchar_t* initialPresetBase64,
     int* slotOut,
     int* inputPinsOut,
     int* outputPinsOut,
@@ -1680,7 +1682,11 @@ __declspec(dllexport) int __cdecl ElkaFx_AddPluginNode(
         layoutName,
         static_cast<int>(streamKind),
         0,
-        layoutChannels);
+        layoutChannels,
+        narrowWide(initialStateBase64),
+        narrowWide(initialPresetBase64));
+
+    const auto pluginRestoreWarning = target.plugins.lastError();
 
     if (slot < 0)
     {
@@ -1713,8 +1719,75 @@ __declspec(dllexport) int __cdecl ElkaFx_AddPluginNode(
 
     std::wstring error;
     startLocked(target, error);
-    writeWide(error.empty() ? L"VST node loaded as free module" : error, status, statusChars);
+    auto message = error.empty() ? L"VST node loaded as free module" : error;
+    if (!pluginRestoreWarning.empty())
+        message += L" | Saved state warning: " + widenUtf8(pluginRestoreWarning);
+    writeWide(message, status, statusChars);
     return 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_AddPluginNode(
+    int pluginIndex,
+    int mode,
+    int mainInputPins,
+    int sidechainInputPins,
+    int outputPins,
+    int x,
+    int y,
+    int* slotOut,
+    int* inputPinsOut,
+    int* outputPinsOut,
+    wchar_t* status,
+    int statusChars)
+{
+    return addPluginNodeNative(
+        pluginIndex,
+        mode,
+        mainInputPins,
+        sidechainInputPins,
+        outputPins,
+        x,
+        y,
+        nullptr,
+        nullptr,
+        slotOut,
+        inputPinsOut,
+        outputPinsOut,
+        status,
+        statusChars);
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_AddPluginNodeWithState(
+    int pluginIndex,
+    int mode,
+    int mainInputPins,
+    int sidechainInputPins,
+    int outputPins,
+    int x,
+    int y,
+    const wchar_t* initialStateBase64,
+    const wchar_t* initialPresetBase64,
+    int* slotOut,
+    int* inputPinsOut,
+    int* outputPinsOut,
+    wchar_t* status,
+    int statusChars)
+{
+    return addPluginNodeNative(
+        pluginIndex,
+        mode,
+        mainInputPins,
+        sidechainInputPins,
+        outputPins,
+        x,
+        y,
+        initialStateBase64,
+        initialPresetBase64,
+        slotOut,
+        inputPinsOut,
+        outputPinsOut,
+        status,
+        statusChars);
 }
 
 __declspec(dllexport) int __cdecl ElkaFx_SetPluginNodeBypassed(int slot, int bypassed)
@@ -1773,6 +1846,78 @@ __declspec(dllexport) int __cdecl ElkaFx_OpenPluginEditor(int slot, wchar_t* sta
 
     writeWide(L"Plugin editor opened", status, statusChars);
     return 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginNodeStateLength(int slot)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    const auto state = target.plugins.pluginNodeStateBase64(slot);
+    return state.empty() ? 1 : static_cast<int>(state.size()) + 1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginNodeState(int slot, wchar_t* buffer, int bufferChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    const auto state = target.plugins.pluginNodeStateBase64(slot);
+    writeWide(widenUtf8(state), buffer, bufferChars);
+    return state.empty() && !target.plugins.lastError().empty() ? -1 : 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_SetPluginNodeState(int slot, const wchar_t* stateBase64)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    return target.plugins.setPluginNodeStateBase64(slot, narrowWide(stateBase64)) ? 0 : -1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginNodePresetLength(int slot)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    const auto preset = target.plugins.pluginNodePresetBase64(slot);
+    return preset.empty() ? 1 : static_cast<int>(preset.size()) + 1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginNodePreset(int slot, wchar_t* buffer, int bufferChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    const auto preset = target.plugins.pluginNodePresetBase64(slot);
+    writeWide(widenUtf8(preset), buffer, bufferChars);
+    return preset.empty() && !target.plugins.lastError().empty() ? -1 : 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_SetPluginNodePreset(int slot, const wchar_t* presetBase64)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    return target.plugins.setPluginNodePresetBase64(slot, narrowWide(presetBase64)) ? 0 : -1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginNodeParameterStateLength(int slot)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    const auto parameterState = target.plugins.pluginNodeParameterStateBase64(slot);
+    return parameterState.empty() ? 1 : static_cast<int>(parameterState.size()) + 1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginNodeParameterState(int slot, wchar_t* buffer, int bufferChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    const auto parameterState = target.plugins.pluginNodeParameterStateBase64(slot);
+    writeWide(widenUtf8(parameterState), buffer, bufferChars);
+    return parameterState.empty() && !target.plugins.lastError().empty() ? -1 : 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_SetPluginNodeParameterState(int slot, const wchar_t* parameterStateBase64)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    return target.plugins.setPluginNodeParameterStateBase64(slot, narrowWide(parameterStateBase64)) ? 0 : -1;
 }
 
 __declspec(dllexport) int __cdecl ElkaFx_RemovePluginNode(int slot)

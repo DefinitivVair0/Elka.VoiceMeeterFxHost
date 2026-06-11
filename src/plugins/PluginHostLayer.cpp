@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <iomanip>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -76,6 +77,296 @@ juce::File legacyPluginCacheFile()
         .getChildFile("Elka")
         .getChildFile("VoiceMeeterFxHost")
         .getChildFile("vst3-cache.xml");
+}
+
+template <typename Callback>
+bool runOnJuceMessageThread(Callback&& callback)
+{
+    auto* messageManager = juce::MessageManager::getInstance();
+    if (messageManager->isThisTheMessageThread())
+        return callback();
+
+    auto result = juce::MessageManager::callSync([&callback]() -> bool
+    {
+        return callback();
+    });
+
+    return result.has_value() && *result;
+}
+
+bool applyPluginStateBase64(juce::AudioPluginInstance& plugin, const std::string& stateBase64, std::string& stateError)
+{
+    stateError.clear();
+    if (stateBase64.empty())
+        return true;
+
+    juce::MemoryBlock state;
+    if (!state.fromBase64Encoding(juce::String::fromUTF8(stateBase64.c_str())))
+    {
+        stateError = "Saved plugin state could not be decoded.";
+        return false;
+    }
+
+    const auto restored = runOnJuceMessageThread([&]() -> bool
+    {
+        try
+        {
+            plugin.suspendProcessing(true);
+            struct ResumeProcessing
+            {
+                juce::AudioPluginInstance& plugin;
+                ~ResumeProcessing() { plugin.suspendProcessing(false); }
+            } resume { plugin };
+
+            plugin.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+            plugin.updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
+                .withNonParameterStateChanged(true)
+                .withParameterInfoChanged(true));
+            return true;
+        }
+        catch (const std::exception& ex)
+        {
+            stateError = ex.what();
+        }
+        catch (...)
+        {
+            stateError = "The plugin state could not be restored.";
+        }
+
+        return false;
+    });
+
+    if (!restored && stateError.empty())
+        stateError = "The plugin state could not be restored on the JUCE message thread.";
+
+    return restored;
+}
+
+bool capturePluginPresetBase64(juce::AudioPluginInstance& plugin, std::string& presetBase64, std::string& presetError)
+{
+    presetBase64.clear();
+    presetError.clear();
+
+    const auto captured = runOnJuceMessageThread([&]() -> bool
+    {
+        try
+        {
+            auto* vst3 = plugin.getVST3Client();
+            if (vst3 == nullptr)
+                return true;
+
+            juce::MemoryBlock flushedState;
+            plugin.getStateInformation(flushedState);
+
+            const auto preset = vst3->getPreset();
+            if (preset.getSize() > 0)
+                presetBase64 = preset.toBase64Encoding().toStdString();
+            return true;
+        }
+        catch (const std::exception& ex)
+        {
+            presetError = ex.what();
+        }
+        catch (...)
+        {
+            presetError = "The VST3 preset data could not be saved.";
+        }
+
+        return false;
+    });
+
+    if (!captured && presetError.empty())
+        presetError = "The VST3 preset data could not be captured on the JUCE message thread.";
+
+    return captured;
+}
+
+bool applyPluginPresetBase64(juce::AudioPluginInstance& plugin, const std::string& presetBase64, std::string& presetError)
+{
+    presetError.clear();
+    if (presetBase64.empty())
+        return true;
+
+    juce::MemoryBlock preset;
+    if (!preset.fromBase64Encoding(juce::String::fromUTF8(presetBase64.c_str())))
+    {
+        presetError = "Saved VST3 preset data could not be decoded.";
+        return false;
+    }
+
+    const auto restored = runOnJuceMessageThread([&]() -> bool
+    {
+        try
+        {
+            auto* vst3 = plugin.getVST3Client();
+            if (vst3 == nullptr)
+            {
+                presetError = "The plugin does not expose VST3 preset data.";
+                return false;
+            }
+
+            plugin.suspendProcessing(true);
+            struct ResumeProcessing
+            {
+                juce::AudioPluginInstance& plugin;
+                ~ResumeProcessing() { plugin.suspendProcessing(false); }
+            } resume { plugin };
+
+            const auto applied = vst3->setPreset(preset);
+            if (applied)
+            {
+                plugin.updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
+                    .withNonParameterStateChanged(true)
+                    .withParameterInfoChanged(true));
+            }
+
+            return applied;
+        }
+        catch (const std::exception& ex)
+        {
+            presetError = ex.what();
+        }
+        catch (...)
+        {
+            presetError = "The VST3 preset data could not be restored.";
+        }
+
+        return false;
+    });
+
+    if (!restored && presetError.empty())
+        presetError = "The VST3 preset data could not be restored on the JUCE message thread.";
+
+    return restored;
+}
+
+std::string capturePluginParameterStateBase64(juce::AudioPluginInstance& plugin, std::string& parameterError)
+{
+    parameterError.clear();
+
+    std::string parameterStateBase64;
+    const auto captured = runOnJuceMessageThread([&]() -> bool
+    {
+        try
+        {
+            std::ostringstream snapshot;
+            snapshot << "ELKA_PLUGIN_PARAMETERS_V1\n";
+            const auto& parameters = plugin.getParameters();
+            snapshot << parameters.size() << '\n';
+            snapshot << std::setprecision(9);
+
+            for (int index = 0; index < parameters.size(); ++index)
+            {
+                if (auto* parameter = parameters[index])
+                {
+                    snapshot << index << '\t'
+                             << std::clamp(parameter->getValue(), 0.0f, 1.0f)
+                             << '\n';
+                }
+            }
+
+            const auto text = snapshot.str();
+            juce::MemoryBlock data(text.data(), text.size());
+            parameterStateBase64 = data.toBase64Encoding().toStdString();
+            return true;
+        }
+        catch (const std::exception& ex)
+        {
+            parameterError = ex.what();
+        }
+        catch (...)
+        {
+            parameterError = "The plugin parameter snapshot could not be saved.";
+        }
+
+        return false;
+    });
+
+    if (!captured && parameterError.empty())
+        parameterError = "The plugin parameter snapshot could not be captured on the JUCE message thread.";
+
+    return captured ? parameterStateBase64 : std::string {};
+}
+
+bool applyPluginParameterStateBase64(juce::AudioPluginInstance& plugin, const std::string& parameterStateBase64, std::string& parameterError)
+{
+    parameterError.clear();
+    if (parameterStateBase64.empty())
+        return true;
+
+    juce::MemoryBlock data;
+    if (!data.fromBase64Encoding(juce::String::fromUTF8(parameterStateBase64.c_str())))
+    {
+        parameterError = "Saved plugin parameter snapshot could not be decoded.";
+        return false;
+    }
+
+    const auto restored = runOnJuceMessageThread([&]() -> bool
+    {
+        try
+        {
+            const auto text = std::string(static_cast<const char*>(data.getData()), data.getSize());
+            std::istringstream input(text);
+            std::string line;
+            if (!std::getline(input, line) || line != "ELKA_PLUGIN_PARAMETERS_V1")
+            {
+                parameterError = "Saved plugin parameter snapshot has an unknown format.";
+                return false;
+            }
+
+            std::getline(input, line);
+            const auto& parameters = plugin.getParameters();
+
+            plugin.suspendProcessing(true);
+            struct ResumeProcessing
+            {
+                juce::AudioPluginInstance& plugin;
+                ~ResumeProcessing() { plugin.suspendProcessing(false); }
+            } resume { plugin };
+
+            int appliedCount = 0;
+            while (std::getline(input, line))
+            {
+                if (line.empty())
+                    continue;
+
+                const auto tab = line.find('\t');
+                if (tab == std::string::npos)
+                    continue;
+
+                const auto index = std::stoi(line.substr(0, tab));
+                const auto value = std::stof(line.substr(tab + 1));
+                if (index < 0 || index >= parameters.size())
+                    continue;
+
+                if (auto* parameter = parameters[index])
+                {
+                    parameter->setValueNotifyingHost(std::clamp(value, 0.0f, 1.0f));
+                    ++appliedCount;
+                }
+            }
+
+            plugin.updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
+                .withNonParameterStateChanged(true)
+                .withParameterInfoChanged(true));
+            return appliedCount > 0 || parameters.isEmpty();
+        }
+        catch (const std::exception& ex)
+        {
+            parameterError = ex.what();
+        }
+        catch (...)
+        {
+            parameterError = "The plugin parameter snapshot could not be restored.";
+        }
+
+        return false;
+    });
+
+    if (!restored && parameterError.empty())
+        parameterError = "The plugin parameter snapshot could not be restored on the JUCE message thread.";
+
+    return restored;
 }
 
 bool pluginFileExists(const juce::PluginDescription& description)
@@ -771,7 +1062,9 @@ int PluginHostLayer::addDiscoveredPluginNode(
     const std::string& layoutName,
     int kind,
     int sourceStart,
-    int sourceCount)
+    int sourceCount,
+    const std::string& initialStateBase64,
+    const std::string& initialPresetBase64)
 {
     error.clear();
 
@@ -859,10 +1152,22 @@ int PluginHostLayer::addDiscoveredPluginNode(
         if (instance->getBusCount(false) > 0)
             layoutAccepted = instance->setChannelLayoutOfBus(false, 0, outputLayout) && layoutAccepted;
 
+        std::string stateRestoreWarning;
+        if (!initialPresetBase64.empty())
+            applyPluginPresetBase64(*instance, initialPresetBase64, stateRestoreWarning);
+        if (!initialStateBase64.empty())
+            applyPluginStateBase64(*instance, initialStateBase64, stateRestoreWarning);
+
         // setPlayConfigDetails() disables non-main buses in JUCE. Keep sidechain
         // buses alive by using the explicit bus layouts configured above.
         instance->setRateAndBufferSizeDetails(static_cast<double>(preparedSampleRate), preparedBlockSize);
         instance->prepareToPlay(static_cast<double>(preparedSampleRate), preparedBlockSize);
+
+        if (!initialPresetBase64.empty())
+            applyPluginPresetBase64(*instance, initialPresetBase64, stateRestoreWarning);
+        if (!initialStateBase64.empty())
+            applyPluginStateBase64(*instance, initialStateBase64, stateRestoreWarning);
+
         const int effectiveInputPins = std::clamp(requestedMainInputPins + effectiveSidechainPins, 1, 32);
 
         const auto slotIndex = static_cast<size_t>(slot);
@@ -892,6 +1197,8 @@ int PluginHostLayer::addDiscoveredPluginNode(
             0
         };
         impl->loadedName = discoveredPlugins[index].name;
+        if (!stateRestoreWarning.empty())
+            error = stateRestoreWarning;
     }
     catch (const std::exception& ex)
     {
@@ -1015,6 +1322,274 @@ void PluginHostLayer::closePluginEditor(int slot) noexcept
         return;
 
     impl->nodeEditors[static_cast<size_t>(slot)].reset();
+#endif
+}
+
+std::string PluginHostLayer::pluginNodeStateBase64(int slot)
+{
+    error.clear();
+
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    if (slot < 0 || slot >= MaxPluginNodes)
+    {
+        error = "No VST node is selected.";
+        return {};
+    }
+
+    auto* processor = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (processor == nullptr || processor->pluginInstance() == nullptr)
+    {
+        error = "No VST node is selected.";
+        return {};
+    }
+
+    try
+    {
+        std::string stateBase64;
+        std::string stateError;
+        const auto saved = runOnJuceMessageThread([&]() -> bool
+        {
+            try
+            {
+                juce::MemoryBlock state;
+                processor->pluginInstance()->getStateInformation(state);
+                stateBase64 = state.toBase64Encoding().toStdString();
+                return true;
+            }
+            catch (const std::exception& ex)
+            {
+                stateError = ex.what();
+            }
+            catch (...)
+            {
+                stateError = "The plugin state could not be saved.";
+            }
+
+            return false;
+        });
+
+        if (!saved)
+        {
+            error = stateError.empty()
+                ? "The plugin state could not be captured on the JUCE message thread."
+                : stateError;
+            return {};
+        }
+
+        return stateBase64;
+    }
+    catch (const std::exception& ex)
+    {
+        error = ex.what();
+    }
+    catch (...)
+    {
+        error = "The plugin state could not be saved.";
+    }
+
+    return {};
+#else
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return {};
+#endif
+}
+
+bool PluginHostLayer::setPluginNodeStateBase64(int slot, const std::string& stateBase64)
+{
+    error.clear();
+
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    if (slot < 0 || slot >= MaxPluginNodes)
+    {
+        error = "No VST node is selected.";
+        return false;
+    }
+
+    auto* processor = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (processor == nullptr || processor->pluginInstance() == nullptr)
+    {
+        error = "No VST node is selected.";
+        return false;
+    }
+
+    if (stateBase64.empty())
+        return true;
+
+    try
+    {
+        std::string stateError;
+        const auto restored = applyPluginStateBase64(*processor->pluginInstance(), stateBase64, stateError);
+        if (!restored)
+            error = stateError;
+
+        return restored;
+    }
+    catch (const std::exception& ex)
+    {
+        error = ex.what();
+    }
+    catch (...)
+    {
+        error = "The plugin state could not be restored.";
+    }
+
+    return false;
+#else
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return false;
+#endif
+}
+
+std::string PluginHostLayer::pluginNodePresetBase64(int slot)
+{
+    error.clear();
+
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    if (slot < 0 || slot >= MaxPluginNodes)
+    {
+        error = "No VST node is selected.";
+        return {};
+    }
+
+    auto* processor = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (processor == nullptr || processor->pluginInstance() == nullptr)
+    {
+        error = "No VST node is selected.";
+        return {};
+    }
+
+    try
+    {
+        std::string presetBase64;
+        std::string presetError;
+        if (!capturePluginPresetBase64(*processor->pluginInstance(), presetBase64, presetError))
+        {
+            error = presetError;
+            return {};
+        }
+
+        return presetBase64;
+    }
+    catch (const std::exception& ex)
+    {
+        error = ex.what();
+    }
+    catch (...)
+    {
+        error = "The VST3 preset data could not be saved.";
+    }
+
+    return {};
+#else
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return {};
+#endif
+}
+
+bool PluginHostLayer::setPluginNodePresetBase64(int slot, const std::string& presetBase64)
+{
+    error.clear();
+
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    if (slot < 0 || slot >= MaxPluginNodes)
+    {
+        error = "No VST node is selected.";
+        return false;
+    }
+
+    auto* processor = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (processor == nullptr || processor->pluginInstance() == nullptr)
+    {
+        error = "No VST node is selected.";
+        return false;
+    }
+
+    if (presetBase64.empty())
+        return true;
+
+    try
+    {
+        std::string presetError;
+        const auto restored = applyPluginPresetBase64(*processor->pluginInstance(), presetBase64, presetError);
+        if (!restored)
+            error = presetError;
+
+        return restored;
+    }
+    catch (const std::exception& ex)
+    {
+        error = ex.what();
+    }
+    catch (...)
+    {
+        error = "The VST3 preset data could not be restored.";
+    }
+
+    return false;
+#else
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return false;
+#endif
+}
+
+std::string PluginHostLayer::pluginNodeParameterStateBase64(int slot)
+{
+    error.clear();
+
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    if (slot < 0 || slot >= MaxPluginNodes)
+    {
+        error = "No VST node is selected.";
+        return {};
+    }
+
+    auto* processor = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (processor == nullptr || processor->pluginInstance() == nullptr)
+    {
+        error = "No VST node is selected.";
+        return {};
+    }
+
+    std::string parameterError;
+    auto parameterState = capturePluginParameterStateBase64(*processor->pluginInstance(), parameterError);
+    if (parameterState.empty() && !parameterError.empty())
+        error = parameterError;
+    return parameterState;
+#else
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return {};
+#endif
+}
+
+bool PluginHostLayer::setPluginNodeParameterStateBase64(int slot, const std::string& parameterStateBase64)
+{
+    error.clear();
+
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    if (slot < 0 || slot >= MaxPluginNodes)
+    {
+        error = "No VST node is selected.";
+        return false;
+    }
+
+    auto* processor = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (processor == nullptr || processor->pluginInstance() == nullptr)
+    {
+        error = "No VST node is selected.";
+        return false;
+    }
+
+    if (parameterStateBase64.empty())
+        return true;
+
+    std::string parameterError;
+    const auto restored = applyPluginParameterStateBase64(*processor->pluginInstance(), parameterStateBase64, parameterError);
+    if (!restored)
+        error = parameterError;
+    return restored;
+#else
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return false;
 #endif
 }
 
