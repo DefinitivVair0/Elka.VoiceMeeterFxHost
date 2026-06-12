@@ -355,7 +355,7 @@ internal enum PluginFormatFilter
     All = Vst3 | Vst2
 }
 
-internal sealed record PluginChoice(int Index, string Name, string Format)
+internal sealed record PluginChoice(int Index, string Name, string Format, string Identifier = "")
 {
     public override string ToString() => Name;
 }
@@ -519,6 +519,8 @@ internal sealed class NativeEngineClient : IDisposable
     }
 
     public bool IsAttached => _attached;
+
+    public string LastStatus => _lastStatus;
 
     public bool HasAudioClock => _attached && GetStats().SampleRate > 0;
 
@@ -686,7 +688,11 @@ internal sealed class NativeEngineClient : IDisposable
                 var format = ElkaFx_GetPluginFormat(index, formatBuffer, formatBuffer.Capacity) == 0
                     ? NormalizePluginFormat(formatBuffer.ToString())
                     : string.Empty;
-                plugins.Add(new PluginChoice(index, buffer.ToString(), format));
+                var identifierBuffer = new StringBuilder(2048);
+                var identifier = ElkaFx_GetPluginIdentifier(index, identifierBuffer, identifierBuffer.Capacity) == 0
+                    ? identifierBuffer.ToString()
+                    : string.Empty;
+                plugins.Add(new PluginChoice(index, buffer.ToString(), format, identifier));
             }
         }
 
@@ -700,7 +706,7 @@ internal sealed class NativeEngineClient : IDisposable
             return _lastStatus;
         }
 
-        var status = new StringBuilder(512);
+        var status = new StringBuilder(64 * 1024);
         var folderText = string.Join(";", customFolders
             .Where(static folder => !string.IsNullOrWhiteSpace(folder))
             .Select(static folder => folder.Trim())
@@ -708,6 +714,30 @@ internal sealed class NativeEngineClient : IDisposable
         var result = ElkaFx_ScanPluginFoldersEx(folderText, includeDefaults: 1, (int)formatFilter, status, status.Capacity);
         _lastStatus = status.ToString();
         return result >= 0 ? _lastStatus : $"Scan failed: {_lastStatus}";
+    }
+
+    public string PluginScanProgress()
+    {
+        if (!_attached)
+        {
+            return string.Empty;
+        }
+
+        var status = new StringBuilder(4096);
+        ElkaFx_GetPluginScanProgress(status, status.Capacity);
+        return status.ToString();
+    }
+
+    public string PluginLoadProgress()
+    {
+        if (!_attached)
+        {
+            return string.Empty;
+        }
+
+        var status = new StringBuilder(4096);
+        ElkaFx_GetPluginLoadProgress(status, status.Capacity);
+        return status.ToString();
     }
 
     private static string NormalizePluginFormat(string format)
@@ -934,7 +964,8 @@ internal sealed class NativeEngineClient : IDisposable
         int x,
         int y,
         string? initialStateBase64 = null,
-        string? initialPresetBase64 = null)
+        string? initialPresetBase64 = null,
+        bool sandboxed = false)
     {
         if (!_attached)
         {
@@ -949,7 +980,21 @@ internal sealed class NativeEngineClient : IDisposable
             !string.IsNullOrWhiteSpace(initialStateBase64) ||
             !string.IsNullOrWhiteSpace(initialPresetBase64);
 
-        var result = !hasInitialPluginData
+        var result = sandboxed
+            ? ElkaFx_AddSandboxedPluginNode(
+                choice.Index,
+                (int)mode,
+                mainInputPins,
+                sidechainInputPins,
+                outputPins,
+                x,
+                y,
+                ref slot,
+                ref loadedInputPins,
+                ref loadedOutputPins,
+                status,
+                status.Capacity)
+            : !hasInitialPluginData
             ? ElkaFx_AddPluginNode(
                 choice.Index,
                 (int)mode,
@@ -1351,6 +1396,9 @@ internal sealed class NativeEngineClient : IDisposable
     private static extern int ElkaFx_GetPluginFormat(int index, StringBuilder buffer, int bufferChars);
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginIdentifier(int index, StringBuilder buffer, int bufferChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_ScanDefaultVst3(StringBuilder status, int statusChars);
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
@@ -1367,6 +1415,12 @@ internal sealed class NativeEngineClient : IDisposable
         int formatFlags,
         StringBuilder status,
         int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginScanProgress(StringBuilder buffer, int bufferChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetPluginLoadProgress(StringBuilder buffer, int bufferChars);
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_AddPluginNode(
@@ -1394,6 +1448,21 @@ internal sealed class NativeEngineClient : IDisposable
         int y,
         string initialStateBase64,
         string initialPresetBase64,
+        ref int slotOut,
+        ref int inputPinsOut,
+        ref int outputPinsOut,
+        StringBuilder status,
+        int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_AddSandboxedPluginNode(
+        int pluginIndex,
+        int mode,
+        int mainInputPins,
+        int sidechainInputPins,
+        int outputPins,
+        int x,
+        int y,
         ref int slotOut,
         ref int inputPinsOut,
         ref int outputPinsOut,

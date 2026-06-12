@@ -147,6 +147,20 @@ std::mutex g_mutex;
 std::mutex g_scanMutex;
 std::unique_ptr<NativeHost> g_host;
 
+struct ScanProgressState
+{
+    bool running = false;
+    int current = 0;
+    int total = 0;
+    std::wstring stage;
+    std::wstring path;
+};
+
+std::mutex g_scanProgressMutex;
+ScanProgressState g_scanProgress;
+std::mutex g_pluginLoadProgressMutex;
+ScanProgressState g_pluginLoadProgress;
+
 constexpr int ScanFormatVst3 = 1;
 constexpr int ScanFormatVst2 = 2;
 constexpr int ScanFormatAll = ScanFormatVst3 | ScanFormatVst2;
@@ -338,6 +352,48 @@ std::string narrowWide(const wchar_t* value)
     std::string result(static_cast<size_t>(required - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), required, nullptr, nullptr);
     return result;
+}
+
+void setScanProgress(bool running, const std::string& stage, const std::string& path, int current, int total)
+{
+    std::lock_guard lock(g_scanProgressMutex);
+    g_scanProgress.running = running;
+    g_scanProgress.current = current;
+    g_scanProgress.total = total;
+    g_scanProgress.stage = widenUtf8(stage);
+    g_scanProgress.path = widenUtf8(path);
+}
+
+std::wstring scanProgressSnapshot()
+{
+    std::lock_guard lock(g_scanProgressMutex);
+    std::wstring snapshot;
+    snapshot += L"running=" + std::to_wstring(g_scanProgress.running ? 1 : 0) + L"\n";
+    snapshot += L"current=" + std::to_wstring(g_scanProgress.current) + L"\n";
+    snapshot += L"total=" + std::to_wstring(g_scanProgress.total) + L"\n";
+    snapshot += L"stage=" + g_scanProgress.stage + L"\n";
+    snapshot += L"path=" + g_scanProgress.path + L"\n";
+    return snapshot;
+}
+
+void setPluginLoadProgress(bool running, const std::string& stage, const std::string& detail)
+{
+    std::lock_guard lock(g_pluginLoadProgressMutex);
+    g_pluginLoadProgress.running = running;
+    g_pluginLoadProgress.current = 0;
+    g_pluginLoadProgress.total = 0;
+    g_pluginLoadProgress.stage = widenUtf8(stage);
+    g_pluginLoadProgress.path = widenUtf8(detail);
+}
+
+std::wstring pluginLoadProgressSnapshot()
+{
+    std::lock_guard lock(g_pluginLoadProgressMutex);
+    std::wstring snapshot;
+    snapshot += L"running=" + std::to_wstring(g_pluginLoadProgress.running ? 1 : 0) + L"\n";
+    snapshot += L"stage=" + g_pluginLoadProgress.stage + L"\n";
+    snapshot += L"detail=" + g_pluginLoadProgress.path + L"\n";
+    return snapshot;
 }
 
 std::vector<std::string> splitPluginFolders(const wchar_t* folders)
@@ -1078,6 +1134,7 @@ int scanPluginFoldersNative(
 {
     const int safeFormatFlags = normalizePluginScanFlags(formatFlags);
     std::lock_guard scanLock(g_scanMutex);
+    setScanProgress(true, "Preparing plugin scan", "", 0, 0);
 
     NativeHost* target = nullptr;
     std::vector<std::string> paths;
@@ -1097,10 +1154,19 @@ int scanPluginFoldersNative(
     std::sort(paths.begin(), paths.end());
     paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
 
-    const int count = target->plugins.scanPluginPaths(paths, false, safeFormatFlags);
+    const int count = target->plugins.scanPluginPaths(
+        paths,
+        false,
+        safeFormatFlags,
+        [](const std::string& stage, const std::string& path, int current, int total) {
+            setScanProgress(true, stage, path, current, total);
+        });
+
     if (!target->plugins.lastError().empty())
     {
-        writeWide(widenUtf8(target->plugins.lastError()), status, statusChars);
+        const auto errorText = target->plugins.lastError();
+        setScanProgress(false, "Plugin scan failed", errorText, 0, 0);
+        writeWide(widenUtf8(errorText), status, statusChars);
         return -1;
     }
 
@@ -1127,6 +1193,7 @@ int scanPluginFoldersNative(
     }
 
     writeWide(message, status, statusChars);
+    setScanProgress(false, "Plugin scan complete", "Plugin scan complete: " + std::to_string(count) + " plugin(s)", count, count);
     return count;
 }
 }
@@ -1601,6 +1668,20 @@ __declspec(dllexport) int __cdecl ElkaFx_GetPluginFormat(int index, wchar_t* buf
     return 0;
 }
 
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginIdentifier(int index, wchar_t* buffer, int bufferChars)
+{
+    std::lock_guard lock(g_mutex);
+    const auto& plugins = host().plugins.plugins();
+    if (index < 0 || index >= static_cast<int>(plugins.size()))
+    {
+        writeWide(L"", buffer, bufferChars);
+        return -1;
+    }
+
+    writeWide(widenUtf8(plugins[static_cast<size_t>(index)].fileOrIdentifier), buffer, bufferChars);
+    return 0;
+}
+
 __declspec(dllexport) int __cdecl ElkaFx_ScanDefaultVst3(wchar_t* status, int statusChars)
 {
     return scanPluginFoldersNative(L"", 1, ScanFormatVst3, status, statusChars);
@@ -1625,6 +1706,124 @@ __declspec(dllexport) int __cdecl ElkaFx_ScanPluginFoldersEx(
     return scanPluginFoldersNative(folders, includeDefaults, formatFlags, status, statusChars);
 }
 
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginScanProgress(wchar_t* buffer, int bufferChars)
+{
+    const auto snapshot = scanProgressSnapshot();
+    writeWide(snapshot, buffer, bufferChars);
+
+    std::lock_guard lock(g_scanProgressMutex);
+    return g_scanProgress.running ? 1 : 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_GetPluginLoadProgress(wchar_t* buffer, int bufferChars)
+{
+    const auto snapshot = pluginLoadProgressSnapshot();
+    writeWide(snapshot, buffer, bufferChars);
+
+    std::lock_guard lock(g_pluginLoadProgressMutex);
+    return g_pluginLoadProgress.running ? 1 : 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_ProbePluginFile(
+    const wchar_t* format,
+    const wchar_t* fileOrIdentifier,
+    int sampleRate,
+    int blockSize,
+    wchar_t* status,
+    int statusChars)
+{
+    const auto formatText = narrowWide(format);
+    const auto identifierText = narrowWide(fileOrIdentifier);
+    std::string error;
+    setPluginLoadProgress(true, "Probe starting", identifierText);
+
+    const bool ok = probePluginFile(
+        formatText,
+        identifierText,
+        sampleRate > 0 ? sampleRate : 48000,
+        blockSize > 0 ? blockSize : 512,
+        error,
+        [](const std::string& stage, const std::string& detail) {
+            setPluginLoadProgress(true, stage, detail);
+        });
+
+    if (ok)
+    {
+        setPluginLoadProgress(false, "Probe complete", identifierText);
+        writeWide(L"Plugin probe succeeded.", status, statusChars);
+        return 0;
+    }
+
+    setPluginLoadProgress(false, "Probe failed", error);
+    writeWide(L"Plugin probe failed: " + widenUtf8(error), status, statusChars);
+    return -1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_WorkerCreatePlugin(
+    const wchar_t* format,
+    const wchar_t* fileOrIdentifier,
+    int sampleRate,
+    int blockSize,
+    int inputPins,
+    int outputPins,
+    wchar_t* status,
+    int statusChars)
+{
+    std::string error;
+    const int handle = createWorkerPluginProcessor(
+        narrowWide(format),
+        narrowWide(fileOrIdentifier),
+        sampleRate,
+        blockSize,
+        inputPins,
+        outputPins,
+        error);
+
+    if (handle > 0)
+    {
+        writeWide(L"Worker plugin loaded.", status, statusChars);
+        return handle;
+    }
+
+    writeWide(L"Worker plugin load failed: " + widenUtf8(error), status, statusChars);
+    return 0;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_WorkerProcessPlugin(
+    int handle,
+    float* planarData,
+    int channelCount,
+    int samples)
+{
+    return processWorkerPluginProcessor(handle, planarData, channelCount, samples) ? 0 : -1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_WorkerOpenPluginEditor(
+    int handle,
+    wchar_t* status,
+    int statusChars)
+{
+    std::string error;
+    if (openWorkerPluginEditor(handle, error))
+    {
+        writeWide(L"Worker plugin editor opened.", status, statusChars);
+        return 0;
+    }
+
+    writeWide(L"Worker plugin editor failed: " + widenUtf8(error), status, statusChars);
+    return -1;
+}
+
+__declspec(dllexport) void __cdecl ElkaFx_WorkerPollMessages(int milliseconds)
+{
+    pollWorkerPluginMessages(milliseconds);
+}
+
+__declspec(dllexport) void __cdecl ElkaFx_WorkerDestroyPlugin(int handle)
+{
+    destroyWorkerPluginProcessor(handle);
+}
+
 int addPluginNodeNative(
     int pluginIndex,
     int mode,
@@ -1639,10 +1838,12 @@ int addPluginNodeNative(
     int* inputPinsOut,
     int* outputPinsOut,
     wchar_t* status,
-    int statusChars)
+    int statusChars,
+    bool sandboxed = false)
 {
     std::lock_guard lock(g_mutex);
     auto& target = host();
+    setPluginLoadProgress(true, sandboxed ? "Starting sandboxed plugin node load" : "Starting plugin node load", "index " + std::to_string(pluginIndex));
 
     const auto streamKind = streamKindFromApi(mode);
     const int safeMainInputPins = std::clamp(mainInputPins, 1, 8);
@@ -1664,6 +1865,7 @@ int addPluginNodeNative(
 
     if (sampleRate <= 0)
     {
+        setPluginLoadProgress(false, "Plugin node load failed", "VoiceMeeter has not reported a sample rate yet.");
         writeWide(L"Plugin node add failed: VoiceMeeter has not reported a sample rate yet.", status, statusChars);
         return -1;
     }
@@ -1671,25 +1873,45 @@ int addPluginNodeNative(
     const auto stats = target.engine.getStats();
     const int maxBlockSize = std::max(4096, stats.blockSize > 0 ? stats.blockSize : 512);
 
-    const int slot = target.plugins.addDiscoveredPluginNode(
-        static_cast<size_t>(std::max(0, pluginIndex)),
-        sampleRate,
-        maxBlockSize,
-        safeMainInputPins,
-        safeSidechainInputPins,
-        safeOutputPins,
-        layoutId,
-        layoutName,
-        static_cast<int>(streamKind),
-        0,
-        layoutChannels,
-        narrowWide(initialStateBase64),
-        narrowWide(initialPresetBase64));
+    const int slot = sandboxed
+        ? target.plugins.addSandboxedDiscoveredPluginNode(
+            static_cast<size_t>(std::max(0, pluginIndex)),
+            sampleRate,
+            maxBlockSize,
+            safeMainInputPins,
+            safeSidechainInputPins,
+            safeOutputPins,
+            layoutId,
+            layoutName,
+            static_cast<int>(streamKind),
+            0,
+            layoutChannels,
+            [](const std::string& stage, const std::string& detail) {
+                setPluginLoadProgress(true, stage, detail);
+            })
+        : target.plugins.addDiscoveredPluginNode(
+            static_cast<size_t>(std::max(0, pluginIndex)),
+            sampleRate,
+            maxBlockSize,
+            safeMainInputPins,
+            safeSidechainInputPins,
+            safeOutputPins,
+            layoutId,
+            layoutName,
+            static_cast<int>(streamKind),
+            0,
+            layoutChannels,
+            narrowWide(initialStateBase64),
+            narrowWide(initialPresetBase64),
+            [](const std::string& stage, const std::string& detail) {
+                setPluginLoadProgress(true, stage, detail);
+            });
 
     const auto pluginRestoreWarning = target.plugins.lastError();
 
     if (slot < 0)
     {
+        setPluginLoadProgress(false, "Plugin node load failed", target.plugins.lastError());
         writeWide(L"Plugin node add failed: " + widenUtf8(target.plugins.lastError()), status, statusChars);
         return -1;
     }
@@ -1719,10 +1941,13 @@ int addPluginNodeNative(
 
     std::wstring error;
     startLocked(target, error);
-    auto message = error.empty() ? L"VST node loaded as free module" : error;
-    if (!pluginRestoreWarning.empty())
+    auto message = error.empty()
+        ? (sandboxed ? L"Sandboxed VST node loaded as free module" : L"VST node loaded as free module")
+        : error;
+    if (!sandboxed && !pluginRestoreWarning.empty())
         message += L" | Saved state warning: " + widenUtf8(pluginRestoreWarning);
     writeWide(message, status, statusChars);
+    setPluginLoadProgress(false, sandboxed ? "Sandboxed plugin node loaded" : "Plugin node loaded", "slot " + std::to_string(slot));
     return 0;
 }
 
@@ -1755,6 +1980,38 @@ __declspec(dllexport) int __cdecl ElkaFx_AddPluginNode(
         outputPinsOut,
         status,
         statusChars);
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_AddSandboxedPluginNode(
+    int pluginIndex,
+    int mode,
+    int mainInputPins,
+    int sidechainInputPins,
+    int outputPins,
+    int x,
+    int y,
+    int* slotOut,
+    int* inputPinsOut,
+    int* outputPinsOut,
+    wchar_t* status,
+    int statusChars)
+{
+    return addPluginNodeNative(
+        pluginIndex,
+        mode,
+        mainInputPins,
+        sidechainInputPins,
+        outputPins,
+        x,
+        y,
+        nullptr,
+        nullptr,
+        slotOut,
+        inputPinsOut,
+        outputPinsOut,
+        status,
+        statusChars,
+        true);
 }
 
 __declspec(dllexport) int __cdecl ElkaFx_AddPluginNodeWithState(

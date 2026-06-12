@@ -78,3 +78,26 @@ internal static class StartupCrashLogger
 
     public static string CrashLogPath => Path.Combine(CrashLogDirectory, "startup-crash.log");
 }
+
+internal static class RuntimeLog
+{
+    public static void Write(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(LogDirectory);
+            File.AppendAllText(
+                LogPath,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Runtime logging must never interfere with audio, UI, or startup.
+        }
+    }
+
+    public static string LogDirectory =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ElkaVoiceMeeterFxHost");
+
+    public static string LogPath => Path.Combine(LogDirectory, "runtime.log");
+}

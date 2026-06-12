@@ -569,6 +569,7 @@
                 <Canvas x:Name="RoutingCanvas"
                         Width="929"
                         Height="737"
+                        Focusable="True"
                         Background="{StaticResource FieldBrush}"
                         MouseMove="RoutingCanvas_MouseMove"
                         MouseLeftButtonUp="RoutingCanvas_MouseLeftButtonUp"
@@ -655,6 +656,7 @@
                 <Canvas x:Name="CrossRouteCanvas"
                         Width="980"
                         Height="560"
+                        Focusable="True"
                         Background="{StaticResource FieldBrush}"
                         MouseMove="CrossRouteCanvas_MouseMove"
                         MouseLeftButtonUp="CrossRouteCanvas_MouseLeftButtonUp" />

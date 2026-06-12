@@ -11,6 +11,11 @@ internal static class Program
 
         try
         {
+            if (PluginProbeCli.IsProbeCommand(args))
+            {
+                return PluginProbeCli.Run(args);
+            }
+
             var app = new App();
             app.InitializeComponent();
             return app.Run();

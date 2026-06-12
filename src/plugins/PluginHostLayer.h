@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -11,6 +12,16 @@
 namespace elka
 {
 static constexpr int MaxPluginNodeRoutes = 64;
+
+using PluginScanProgressCallback = std::function<void(const std::string& stage, const std::string& path, int current, int total)>;
+using PluginLoadProgressCallback = std::function<void(const std::string& stage, const std::string& detail)>;
+
+bool probePluginFile(const std::string& format, const std::string& fileOrIdentifier, int sampleRate, int blockSize, std::string& error, PluginLoadProgressCallback progress = {});
+int createWorkerPluginProcessor(const std::string& format, const std::string& fileOrIdentifier, int sampleRate, int blockSize, int inputPins, int outputPins, std::string& error);
+bool processWorkerPluginProcessor(int handle, float* planarData, int channelCount, int samples);
+bool openWorkerPluginEditor(int handle, std::string& error);
+void pollWorkerPluginMessages(int milliseconds);
+void destroyWorkerPluginProcessor(int handle);
 
 struct PluginSummary
 {
@@ -84,9 +95,11 @@ public:
     int scanVst3Folder(const std::string& folder);
     int scanPluginPaths(const std::vector<std::string>& paths, bool append);
     int scanPluginPaths(const std::vector<std::string>& paths, bool append, int formatFlags);
+    int scanPluginPaths(const std::vector<std::string>& paths, bool append, int formatFlags, PluginScanProgressCallback progress);
     bool loadDiscoveredPlugin(size_t index, int sampleRate, int maxBlockSize, int routeChannelCount);
     void unloadPlugin() noexcept;
-    int addDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount, const std::string& initialStateBase64 = {}, const std::string& initialPresetBase64 = {});
+    int addDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount, const std::string& initialStateBase64 = {}, const std::string& initialPresetBase64 = {}, PluginLoadProgressCallback progress = {});
+    int addSandboxedDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount, PluginLoadProgressCallback progress = {});
     void removePluginNode(int slot) noexcept;
     void clearPluginNodes() noexcept;
     bool openPluginEditor(int slot);
@@ -118,6 +131,7 @@ private:
 
     void loadCachedPlugins();
     void saveCachedPlugins() const;
+    bool resolvePluginDescription(size_t index);
 
     std::unique_ptr<Impl> impl;
     std::vector<PluginSummary> discoveredPlugins;

@@ -16,8 +16,10 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _saveTimer;
     private readonly DispatcherTimer _statusTimer;
     private readonly DispatcherTimer _channelApplyTimer;
+    private readonly DispatcherTimer _pluginScanTimer;
     private VbanTextListener? _vbanTextListener;
     private VfxCommandsWindow? _vfxCommandsWindow;
+    private PluginScanProgressWindow? _pluginScanWindow;
     private FxHostSettings _settings = new();
     private VoicemeeterKind _kind = VoicemeeterKind.Potato;
     private CallbackMode _selectedMode = CallbackMode.Input;
@@ -62,6 +64,13 @@ public partial class MainWindow : Window
     private Point _pluginListDragStartPoint;
     private PluginChoice? _pluginListDragChoice;
     private PluginStateCaptureSummary _lastPluginStateCapture;
+    private bool _pluginScanInProgress;
+    private string _pluginScanLabel = string.Empty;
+    private int _pluginScanLastLogSecond;
+    private DateTimeOffset _pluginScanStartedAt;
+    private bool _pluginNodeLoadInProgress;
+    private string _pluginNodeLoadName = string.Empty;
+    private DateTimeOffset _pluginNodeLoadStartedAt;
 
     private const int DefaultVbanControlPort = 6981;
     private const string DefaultVbanControlStreamName = "Command1";
@@ -151,6 +160,11 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromMilliseconds(250)
         };
         _pluginRestoreTimer.Tick += (_, _) => RestoreSavedPluginNodesWhenReady();
+        _pluginScanTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _pluginScanTimer.Tick += (_, _) => UpdatePluginScanProgress(writeHeartbeat: true);
         VbanEnableCheckBox.Checked += VbanControl_Changed;
         VbanEnableCheckBox.Unchecked += VbanControl_Changed;
         VbanLocalOnlyCheckBox.Checked += VbanControl_Changed;
@@ -161,6 +175,7 @@ public partial class MainWindow : Window
         VbanStreamTextBox.KeyDown += VbanControl_KeyDown;
         PreviewKeyDown += MainWindow_PreviewKeyDown;
         PluginListBox.PreviewMouseLeftButtonDown += PluginListBox_PreviewMouseLeftButtonDown;
+        PluginListBox.PreviewMouseDoubleClick += PluginListBox_PreviewMouseDoubleClick;
         PluginListBox.MouseMove += PluginListBox_MouseMove;
         RoutingCanvas.AllowDrop = true;
         RoutingCanvas.DragOver += RoutingCanvas_DragOver;
@@ -184,6 +199,7 @@ public partial class MainWindow : Window
         SelectWorkspaceView(WorkspaceView.Vst);
         ApplyVbanControlSettingsFromUi(showErrors: false);
         AppendLog("Ready.");
+        AppendLog($"Runtime log: {RuntimeLog.LogPath}");
         AppendLog(_engine.StatusText);
         UpdateLiveStatusText();
         _statusTimer.Start();
@@ -275,19 +291,25 @@ public partial class MainWindow : Window
             : Visibility.Visible;
     }
 
-    private void AddNodeButton_Click(object sender, RoutedEventArgs e)
+    private async void AddNodeButton_Click(object sender, RoutedEventArgs e)
     {
-        AddPluginNode(SelectedPluginChoice());
+        await AddPluginNodeAsync(SelectedPluginChoice());
     }
 
-    private void PluginListBox_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    private async void PluginListBox_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        AddPluginNode(SelectedPluginChoice());
+        if (PluginBrowserBusy)
+        {
+            AppendLog(BusyPluginBrowserMessage());
+            return;
+        }
+
+        await AddPluginNodeAsync(SelectedPluginChoice());
     }
 
     private void PluginSearchTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_loading)
+        if (_loading || PluginBrowserBusy)
         {
             return;
         }
@@ -298,6 +320,12 @@ public partial class MainWindow : Window
 
     private void PluginFormatFilterButton_Click(object sender, RoutedEventArgs e)
     {
+        if (PluginBrowserBusy)
+        {
+            AppendLog(BusyPluginBrowserMessage());
+            return;
+        }
+
         if (sender is not Button { Tag: string tag }
             || !Enum.TryParse<PluginFormatFilter>(tag, ignoreCase: true, out var filter))
         {
@@ -312,6 +340,12 @@ public partial class MainWindow : Window
 
     private void AddPluginFolderButton_Click(object sender, RoutedEventArgs e)
     {
+        if (PluginBrowserBusy)
+        {
+            AppendLog(BusyPluginBrowserMessage());
+            return;
+        }
+
         var dialog = new Microsoft.Win32.OpenFolderDialog
         {
             Title = "Select a VST plugin folder to scan"
@@ -327,6 +361,12 @@ public partial class MainWindow : Window
 
     private void RemovePluginFolderButton_Click(object sender, RoutedEventArgs e)
     {
+        if (PluginBrowserBusy)
+        {
+            AppendLog(BusyPluginBrowserMessage());
+            return;
+        }
+
         if (PluginFoldersListBox.SelectedItem is not string folder)
         {
             return;
@@ -340,15 +380,35 @@ public partial class MainWindow : Window
 
     private void PluginFoldersListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        RemovePluginFolderButton.IsEnabled = PluginFoldersListBox.SelectedItem is not null;
+        RemovePluginFolderButton.IsEnabled = !PluginBrowserBusy && PluginFoldersListBox.SelectedItem is not null;
     }
 
     private async void ScanButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_pluginScanInProgress)
+        {
+            AppendLog("Plugin scan is already running.");
+            return;
+        }
+
+        if (_pluginNodeLoadInProgress)
+        {
+            AppendLog($"{_pluginNodeLoadName}: still loading. Wait for this VST before scanning.");
+            return;
+        }
+
         var folders = _settings.PluginScanFolders.ToArray();
         var formatFilter = SanitizePluginFormatFilter(_settings.PluginFormatFilter);
+        _pluginScanInProgress = true;
+        _pluginScanLabel = PluginFormatFilterLabel(formatFilter);
+        _pluginScanStartedAt = DateTimeOffset.Now;
+        _pluginScanLastLogSecond = 0;
+        _pluginListDragChoice = null;
         SetPluginScanControlsEnabled(false);
-        AppendLog($"Plugin scan started ({PluginFormatFilterLabel(formatFilter)}). The window can stay open while JUCE checks the plugin folders.");
+        ShowPluginScanWindow();
+        UpdatePluginScanProgress(writeHeartbeat: false);
+        _pluginScanTimer.Start();
+        AppendLog($"Plugin scan started ({_pluginScanLabel}). This pass inventories plugin files only; plugin metadata is resolved when a VST is added.");
 
         try
         {
@@ -363,7 +423,15 @@ public partial class MainWindow : Window
         }
         finally
         {
+            var elapsed = DateTimeOffset.Now - _pluginScanStartedAt;
+            _pluginScanTimer.Stop();
+            _pluginScanInProgress = false;
+            _pluginScanLabel = string.Empty;
             SetPluginScanControlsEnabled(true);
+            UpdatePluginFormatButtons();
+            UpdateLiveStatusText();
+            _pluginScanWindow?.UpdateProgress(_engine.PluginScanProgress(), elapsed, finished: true);
+            AppendLog($"Plugin scan finished in {elapsed.TotalSeconds:0.0}s.");
         }
     }
 
@@ -1454,6 +1522,19 @@ public partial class MainWindow : Window
 
     private void UpdateLiveStatusText()
     {
+        if (_pluginScanInProgress)
+        {
+            UpdatePluginScanProgress(writeHeartbeat: false);
+            return;
+        }
+
+        if (_pluginNodeLoadInProgress)
+        {
+            var elapsed = DateTimeOffset.Now - _pluginNodeLoadStartedAt;
+            StatusTextBlock.Text = $"Loading VST: {_pluginNodeLoadName} | {elapsed.TotalSeconds:0}s | worker/main host is starting";
+            return;
+        }
+
         _engine.RefreshVoicemeeterParameters();
         StatusTextBlock.Text = _engine.StatusText;
         InsertAsioStatusTextBlock.Text = _engine.InsertAsioStatus();
@@ -1500,6 +1581,101 @@ public partial class MainWindow : Window
         }
 
         ProbeStatusTextBlock.Text = probeText;
+    }
+
+    private void ShowPluginScanWindow()
+    {
+        if (_pluginScanWindow is null)
+        {
+            _pluginScanWindow = new PluginScanProgressWindow
+            {
+                Owner = this
+            };
+            _pluginScanWindow.Closed += (_, _) => _pluginScanWindow = null;
+        }
+
+        if (!_pluginScanWindow.IsVisible)
+        {
+            _pluginScanWindow.Show();
+        }
+
+        _pluginScanWindow.Activate();
+    }
+
+    private void UpdatePluginScanProgress(bool writeHeartbeat)
+    {
+        if (!_pluginScanInProgress)
+        {
+            return;
+        }
+
+        var elapsed = DateTimeOffset.Now - _pluginScanStartedAt;
+        var seconds = Math.Max(0, (int)Math.Floor(elapsed.TotalSeconds));
+        var nativeProgress = _engine.PluginScanProgress();
+        var compactProgress = PluginScanProgressWindow.CompactStatus(nativeProgress);
+        _pluginScanWindow?.UpdateProgress(nativeProgress, elapsed);
+        StatusTextBlock.Text = string.IsNullOrWhiteSpace(compactProgress)
+            ? $"Scanning VST folders: {_pluginScanLabel} | {seconds}s | file inventory"
+            : $"Scanning VST folders: {_pluginScanLabel} | {seconds}s | {compactProgress}";
+
+        if (!writeHeartbeat || seconds < _pluginScanLastLogSecond + 5)
+        {
+            return;
+        }
+
+        _pluginScanLastLogSecond = seconds;
+        AppendLog(string.IsNullOrWhiteSpace(compactProgress)
+            ? $"Plugin scan still running ({seconds}s). File inventory is still walking the selected plugin folders."
+            : $"Plugin scan still running ({seconds}s): {compactProgress}");
+    }
+
+    private static string CompactPluginLoadProgress(string rawProgress)
+    {
+        if (string.IsNullOrWhiteSpace(rawProgress))
+        {
+            return string.Empty;
+        }
+
+        var stage = string.Empty;
+        var detail = string.Empty;
+        foreach (var rawLine in rawProgress.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = rawLine.IndexOf('=');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            var key = rawLine[..separator].Trim();
+            var value = rawLine[(separator + 1)..].Trim();
+            if (key.Equals("stage", StringComparison.OrdinalIgnoreCase))
+            {
+                stage = value;
+            }
+            else if (key.Equals("detail", StringComparison.OrdinalIgnoreCase))
+            {
+                detail = value;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(stage))
+        {
+            return string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(detail))
+        {
+            return stage;
+        }
+
+        var compactDetail = detail;
+        var separatorIndex = detail.IndexOf('|');
+        if (separatorIndex >= 0 && separatorIndex + 1 < detail.Length)
+        {
+            compactDetail = detail[(separatorIndex + 1)..].Trim();
+        }
+
+        return $"{stage}: {compactDetail}";
     }
 
     private void CopyDiagnosticsButton_Click(object sender, RoutedEventArgs e)
@@ -1731,7 +1907,15 @@ public partial class MainWindow : Window
     {
         ScanButton.IsEnabled = enabled;
         AddNodeButton.IsEnabled = enabled;
-        PluginListBox.IsEnabled = enabled;
+        PluginSearchTextBox.IsEnabled = true;
+        PluginSearchTextBox.IsReadOnly = !enabled;
+        PluginSearchTextBox.Cursor = enabled ? Cursors.IBeam : Cursors.AppStarting;
+        PluginFoldersListBox.IsEnabled = true;
+        PluginFoldersListBox.Cursor = enabled ? Cursors.Arrow : Cursors.AppStarting;
+        RemovePluginFolderButton.IsEnabled = enabled && PluginFoldersListBox.SelectedItem is not null;
+        PluginListBox.IsEnabled = true;
+        PluginListBox.IsHitTestVisible = true;
+        PluginListBox.Cursor = enabled ? Cursors.Arrow : Cursors.AppStarting;
         PluginFormatAllButton.IsEnabled = enabled;
         PluginFormatVst3Button.IsEnabled = enabled;
         PluginFormatVst2Button.IsEnabled = enabled;
@@ -3673,6 +3857,9 @@ public partial class MainWindow : Window
         _selectedCrossRouteConnectionKey = CrossRouteConnectionKey(info);
         _selectedCanvasConnectionKey = null;
         _selectedDirectChannelRouteKey = null;
+        _selectedPluginNodeSlot = null;
+        _selectedPluginGroupId = null;
+        CrossRouteCanvas.Focus();
         RebuildCrossRouteCanvas();
         e.Handled = true;
     }
@@ -4384,15 +4571,55 @@ public partial class MainWindow : Window
         return PluginListBox.SelectedItem as PluginChoice;
     }
 
+    private bool PluginBrowserBusy => _pluginScanInProgress || _pluginNodeLoadInProgress;
+
+    private string BusyPluginBrowserMessage()
+    {
+        if (_pluginScanInProgress)
+        {
+            return "Plugin scan is running. You can scroll the list, but adding and dragging VSTs is paused until the scan finishes.";
+        }
+
+        return _pluginNodeLoadInProgress
+            ? $"{_pluginNodeLoadName}: still loading. Wait for this VST before adding or dragging another one."
+            : "Plugin browser is busy.";
+    }
+
     private void PluginListBox_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        if (PluginBrowserBusy)
+        {
+            _pluginListDragChoice = null;
+            e.Handled = true;
+            return;
+        }
+
         _pluginListDragStartPoint = e.GetPosition(null);
         _pluginListDragChoice = PluginChoiceFromElement(e.OriginalSource as DependencyObject) ??
                                 PluginListBox.SelectedItem as PluginChoice;
     }
 
+    private void PluginListBox_PreviewMouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (!PluginBrowserBusy)
+        {
+            return;
+        }
+
+        _pluginListDragChoice = null;
+        AppendLog(BusyPluginBrowserMessage());
+        e.Handled = true;
+    }
+
     private void PluginListBox_MouseMove(object sender, MouseEventArgs e)
     {
+        if (PluginBrowserBusy)
+        {
+            _pluginListDragChoice = null;
+            e.Handled = e.LeftButton == MouseButtonState.Pressed;
+            return;
+        }
+
         if (e.LeftButton != MouseButtonState.Pressed || _pluginListDragChoice is null)
         {
             return;
@@ -4414,42 +4641,60 @@ public partial class MainWindow : Window
 
     private void RoutingCanvas_DragOver(object sender, DragEventArgs e)
     {
-        e.Effects = PluginChoiceFromDrag(e.Data) is null ? DragDropEffects.None : DragDropEffects.Copy;
+        e.Effects = PluginBrowserBusy || PluginChoiceFromDrag(e.Data) is null
+            ? DragDropEffects.None
+            : DragDropEffects.Copy;
         e.Handled = true;
     }
 
-    private void RoutingCanvas_Drop(object sender, DragEventArgs e)
+    private async void RoutingCanvas_Drop(object sender, DragEventArgs e)
     {
+        if (PluginBrowserBusy)
+        {
+            AppendLog(BusyPluginBrowserMessage());
+            e.Handled = true;
+            return;
+        }
+
         var choice = PluginChoiceFromDrag(e.Data);
         if (choice is null)
         {
             return;
         }
 
-        AddPluginNode(choice, e.GetPosition(RoutingCanvas));
+        await AddPluginNodeAsync(choice, e.GetPosition(RoutingCanvas));
         e.Handled = true;
     }
 
     private void Group_DragOver(object sender, DragEventArgs e)
     {
-        e.Effects = PluginChoiceFromDrag(e.Data) is null ? DragDropEffects.None : DragDropEffects.Copy;
+        e.Effects = PluginBrowserBusy || PluginChoiceFromDrag(e.Data) is null
+            ? DragDropEffects.None
+            : DragDropEffects.Copy;
         e.Handled = true;
     }
 
-    private void Group_Drop(object sender, DragEventArgs e)
+    private async void Group_Drop(object sender, DragEventArgs e)
     {
         if (sender is not Border { Tag: PluginGroupSnapshot group })
         {
             return;
         }
 
+        if (PluginBrowserBusy)
+        {
+            AppendLog(BusyPluginBrowserMessage());
+            e.Handled = true;
+            return;
+        }
+
         var choice = PluginChoiceFromDrag(e.Data);
         if (choice is null)
         {
             return;
         }
 
-        AddPluginNode(choice, e.GetPosition(RoutingCanvas), group);
+        await AddPluginNodeAsync(choice, e.GetPosition(RoutingCanvas), group);
         e.Handled = true;
     }
 
@@ -4481,7 +4726,7 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private PluginNodeSnapshot? AddPluginNode(
+    private async Task<PluginNodeSnapshot?> AddPluginNodeAsync(
         PluginChoice? choice,
         Point? canvasPoint = null,
         PluginGroupSnapshot? targetGroup = null)
@@ -4492,19 +4737,90 @@ public partial class MainWindow : Window
             return null;
         }
 
+        if (_pluginNodeLoadInProgress)
+        {
+            AppendLog($"{_pluginNodeLoadName}: still loading. Wait for this VST before adding another one.");
+            return null;
+        }
+
+        if (_pluginScanInProgress)
+        {
+            AppendLog(BusyPluginBrowserMessage());
+            return null;
+        }
+
         var point = canvasPoint ?? _lastCanvasClick;
         var mode = targetGroup?.Mode ?? CurrentVstCanvasNodeMode();
-        var node = _engine.AddPluginNode(
-            choice,
-            mode,
-            mainInputPins: 2,
-            sidechainInputPins: 0,
-            outputPins: 2,
-            Math.Max(300, (int)point.X),
-            Math.Max(80, (int)point.Y));
+        var x = Math.Max(300, (int)point.X);
+        var y = Math.Max(80, (int)point.Y);
+
+        _pluginNodeLoadInProgress = true;
+        _pluginNodeLoadName = choice.Name;
+        _pluginNodeLoadStartedAt = DateTimeOffset.Now;
+        SetPluginScanControlsEnabled(false);
+        UpdateLiveStatusText();
+        AppendLog($"{choice.Name}: loading VST node...");
+
+        PluginNodeSnapshot? node = null;
+        try
+        {
+            var loadSandboxed = false;
+            if (PluginProbeGuard.ShouldProbe(choice))
+            {
+                AppendLog($"{choice.Name}: running isolated plugin probe before loading in the main host...");
+                var probe = await PluginProbeGuard.ProbeAsync(choice, TimeSpan.FromSeconds(25));
+                AppendLog($"{choice.Name}: {probe.Message}");
+                if (!probe.Succeeded)
+                {
+                    AppendLog(probe.TimedOut
+                        ? $"{choice.Name}: blocked from main-host loading because the isolated probe timed out. This plugin needs sandboxed hosting before it can be used safely here."
+                        : $"{choice.Name}: blocked from main-host loading because the isolated probe failed.");
+                    return null;
+                }
+
+                if (PluginProbeGuard.RequiresSandboxedHosting(choice))
+                {
+                    loadSandboxed = true;
+                    AppendLog($"{choice.Name}: isolated probe passed; loading as a sandboxed worker node.");
+                }
+            }
+
+            var loadTask = Task.Run(() => _engine.AddPluginNode(
+                choice,
+                mode,
+                mainInputPins: 2,
+                sidechainInputPins: 0,
+                outputPins: 2,
+                x,
+                y,
+                sandboxed: loadSandboxed));
+
+            while (await Task.WhenAny(loadTask, Task.Delay(TimeSpan.FromSeconds(5))) != loadTask)
+            {
+                var elapsed = DateTimeOffset.Now - _pluginNodeLoadStartedAt;
+                AppendLog($"{choice.Name}: still loading ({elapsed.TotalSeconds:0}s). The plugin may be waiting on licensing, a vendor service, a network check, or the sandbox worker.");
+            }
+
+            node = await loadTask;
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"{choice.Name}: VST node load failed. {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            _pluginNodeLoadInProgress = false;
+            _pluginNodeLoadName = string.Empty;
+            SetPluginScanControlsEnabled(true);
+            UpdatePluginFormatButtons();
+            UpdateLiveStatusText();
+        }
+
         if (node is null)
         {
-            AppendLog(_engine.StatusText);
+            var elapsed = DateTimeOffset.Now - _pluginNodeLoadStartedAt;
+            AppendLog($"{choice.Name}: VST node load failed after {elapsed.TotalSeconds:0.0}s. {_engine.LastStatus}");
             return null;
         }
 
@@ -4512,7 +4828,7 @@ public partial class MainWindow : Window
         _settings.PluginNodes.RemoveAll(existing => existing.Slot == node.Slot);
         _settings.PluginNodes.Add(node);
         _selectedPluginNodeSlot = node.Slot;
-        AppendLog($"Loaded VST node: {node.Name}");
+        AppendLog($"Loaded VST node: {node.Name} in {(DateTimeOffset.Now - _pluginNodeLoadStartedAt).TotalSeconds:0.0}s");
         if (targetGroup is not null)
         {
             AddNodeToGroup(node, targetGroup);
@@ -4970,6 +5286,8 @@ public partial class MainWindow : Window
     {
         _selectedPluginNodeSlot = slot;
         _selectedPluginGroupId = null;
+        ClearSelectedConnectionKeys();
+        FocusRoutingCanvasForShortcuts();
         RebuildVstNodeList();
 
         if (rebuildCanvas && _workspaceView == WorkspaceView.Vst)
@@ -4982,11 +5300,28 @@ public partial class MainWindow : Window
     {
         _selectedPluginGroupId = id;
         _selectedPluginNodeSlot = null;
+        ClearSelectedConnectionKeys();
+        FocusRoutingCanvasForShortcuts();
         RebuildVstNodeList();
 
         if (rebuildCanvas && _workspaceView == WorkspaceView.Vst)
         {
             RebuildRoutingCanvas();
+        }
+    }
+
+    private void ClearSelectedConnectionKeys()
+    {
+        _selectedCanvasConnectionKey = null;
+        _selectedCrossRouteConnectionKey = null;
+        _selectedDirectChannelRouteKey = null;
+    }
+
+    private void FocusRoutingCanvasForShortcuts()
+    {
+        if (_workspaceView == WorkspaceView.Vst || _workspaceView == WorkspaceView.Channels)
+        {
+            RoutingCanvas.Focus();
         }
     }
 
@@ -8165,6 +8500,9 @@ public partial class MainWindow : Window
         _selectedDirectChannelRouteKey = DirectChannelRouteKey(route.SourceChannel, route.DestinationChannel);
         _selectedCanvasConnectionKey = null;
         _selectedCrossRouteConnectionKey = null;
+        _selectedPluginNodeSlot = null;
+        _selectedPluginGroupId = null;
+        FocusRoutingCanvasForShortcuts();
         RebuildRoutingCanvas();
         e.Handled = true;
     }
@@ -8179,6 +8517,9 @@ public partial class MainWindow : Window
         _selectedCanvasConnectionKey = CanvasConnectionKey(connection);
         _selectedCrossRouteConnectionKey = null;
         _selectedDirectChannelRouteKey = null;
+        _selectedPluginNodeSlot = null;
+        _selectedPluginGroupId = null;
+        FocusRoutingCanvasForShortcuts();
         RebuildRoutingCanvas();
         e.Handled = true;
     }
@@ -8955,6 +9296,7 @@ public partial class MainWindow : Window
 
     private void AppendLog(string message)
     {
+        RuntimeLog.Write(message);
         LogTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
         LogTextBox.ScrollToEnd();
     }

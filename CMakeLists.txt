@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(ElkaVoiceMeeterFxHost
-    VERSION 0.1.0
+    VERSION 0.6.0
     DESCRIPTION "VoiceMeeter callback-based FX host prototype"
     LANGUAGES CXX)
 

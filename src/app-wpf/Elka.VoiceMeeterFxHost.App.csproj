@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>0.5.0</Version>
+    <Version>0.6.0</Version>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <StartupObject>Elka.VoiceMeeterFxHost.App.Program</StartupObject>
@@ -35,11 +35,14 @@
     <GitHubRepository Condition="'$(GitHubRepository)' == ''">torment78/Elka.VoiceMeeterFxHost</GitHubRepository>
     <GitHubReleaseTag Condition="'$(GitHubReleaseTag)' == ''">v$(Version)</GitHubReleaseTag>
     <ReleaseDir Condition="'$(ReleaseDir)' == ''">$(RepoRoot)\artifacts\release\</ReleaseDir>
-    <PublishOutputDir Condition="'$(PublishOutputDir)' == ''">$(PublishDir)</PublishOutputDir>
+    <PublishOutputDir Condition="'$(PublishOutputDir)' == '' and '$(PublishDir)' != ''">$(PublishDir)</PublishOutputDir>
+    <PublishOutputDir Condition="'$(PublishOutputDir)' == ''">$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</PublishOutputDir>
     <PublishedExePath Condition="'$(PublishedExePath)' == ''">$(PublishOutputDir)Elka.VoiceMeeterFxHost.App.exe</PublishedExePath>
     <ReleaseExePath Condition="'$(ReleaseExePath)' == ''">$(ReleaseDir)ElkaVoiceMeeterFxHost.exe</ReleaseExePath>
     <ReleaseZipPath Condition="'$(ReleaseZipPath)' == ''">$(ReleaseDir)ElkaVoiceMeeterFxHost-$(RuntimeIdentifier)-framework-dependent.zip</ReleaseZipPath>
     <ReleaseUploadLogPath Condition="'$(ReleaseUploadLogPath)' == ''">$(ReleaseDir)github-upload.log</ReleaseUploadLogPath>
+    <PluginWorkerProject>$(RepoRoot)\src\plugin-worker\Elka.PluginWorker.csproj</PluginWorkerProject>
+    <PluginWorkerOutputDir>$(RepoRoot)\src\plugin-worker\bin\$(Configuration)\net8.0-windows\$(RuntimeIdentifier)\</PluginWorkerOutputDir>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Insiders\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Insiders\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
@@ -69,10 +72,40 @@
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true" />
   </Target>
-  <Target Name="AddNativeBridgeToPublish" BeforeTargets="_ComputeFilesToBundle" DependsOnTargets="BuildNativeBridge">
+  <Target Name="BuildPluginWorker"
+          AfterTargets="Build"
+          Condition="'$(SkipPluginWorkerBuild)' != 'true' and Exists('$(PluginWorkerProject)')">
+    <Message Importance="high" Text="Building Elka plugin worker" />
+    <MSBuild Projects="$(PluginWorkerProject)"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);SelfContained=$(SelfContained)" />
+    <ItemGroup>
+      <PluginWorkerBuildOutput Include="$(PluginWorkerOutputDir)Elka.PluginWorker.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PluginWorkerBuildOutput)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="AddNativeBridgeToPublish" BeforeTargets="ComputeFilesToPublish;_ComputeFilesToBundle" DependsOnTargets="BuildNativeBridge">
     <ItemGroup>
       <ResolvedFileToPublish Include="$(NativeBridgePath)" Condition="Exists('$(NativeBridgePath)')">
         <RelativePath>ElkaVoiceMeeterFxHost.Native.dll</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+  <Target Name="AddPluginWorkerToPublish"
+          BeforeTargets="ComputeFilesToPublish"
+          Condition="Exists('$(PluginWorkerProject)')">
+    <Message Importance="high" Text="Building Elka plugin worker for publish" />
+    <MSBuild Projects="$(PluginWorkerProject)"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);SelfContained=$(SelfContained)" />
+    <ItemGroup>
+      <PluginWorkerPublishFile Include="$(PluginWorkerOutputDir)Elka.PluginWorker.*" />
+      <ResolvedFileToPublish Include="@(PluginWorkerPublishFile)">
+        <RelativePath>%(Filename)%(Extension)</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
         <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
       </ResolvedFileToPublish>
