@@ -11,10 +11,10 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $project = Join-Path $repoRoot "src\app-wpf\Elka.VoiceMeeterFxHost.App.csproj"
 $publishDir = Join-Path $repoRoot "artifacts\publish\ElkaVoiceMeeterFxHost\$Runtime"
-$standaloneDir = Join-Path $repoRoot "artifacts\publish\ElkaVoiceMeeterFxHost\$Runtime-standalone"
+$singleFileDir = Join-Path $repoRoot "artifacts\publish\ElkaVoiceMeeterFxHost\$Runtime-singlefile"
 $releaseDir = Join-Path $repoRoot "artifacts\release"
 $publishExe = Join-Path $publishDir "Elka.VoiceMeeterFxHost.App.exe"
-$standaloneExe = Join-Path $standaloneDir "Elka.VoiceMeeterFxHost.App.exe"
+$singleFileExe = Join-Path $singleFileDir "Elka.VoiceMeeterFxHost.App.exe"
 $releaseExe = Join-Path $releaseDir "ElkaVoiceMeeterFxHost.exe"
 $zipPath = Join-Path $releaseDir "ElkaVoiceMeeterFxHost-$Runtime-framework-dependent.zip"
 
@@ -22,11 +22,11 @@ if (Test-Path $publishDir) {
     Remove-Item -LiteralPath $publishDir -Recurse -Force
 }
 
-if (Test-Path $standaloneDir) {
-    Remove-Item -LiteralPath $standaloneDir -Recurse -Force
+if (Test-Path $singleFileDir) {
+    Remove-Item -LiteralPath $singleFileDir -Recurse -Force
 }
 
-New-Item -ItemType Directory -Force -Path $publishDir, $standaloneDir, $releaseDir | Out-Null
+New-Item -ItemType Directory -Force -Path $publishDir, $singleFileDir, $releaseDir | Out-Null
 
 dotnet publish $project `
     -c $Configuration `
@@ -48,8 +48,8 @@ if (!(Test-Path $publishExe)) {
 dotnet publish $project `
     -c $Configuration `
     -r $Runtime `
-    --self-contained true `
-    -o $standaloneDir `
+    --self-contained false `
+    -o $singleFileDir `
     -p:PublishSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:IncludeAllContentForSelfExtract=true `
@@ -57,17 +57,18 @@ dotnet publish $project `
     -p:ElkaUploadGitHubRelease=false
 
 if ($LASTEXITCODE -ne 0) {
-    throw "standalone dotnet publish failed with exit code $LASTEXITCODE"
+    throw "single-file dotnet publish failed with exit code $LASTEXITCODE"
 }
 
-if (!(Test-Path $standaloneExe)) {
-    throw "Standalone publish did not create $standaloneExe"
+if (!(Test-Path $singleFileExe)) {
+    throw "Single-file publish did not create $singleFileExe"
 }
 
-Copy-Item -LiteralPath $standaloneExe -Destination $releaseExe -Force
-if ((Get-Item -LiteralPath $releaseExe).Length -lt 10000000) {
-    throw "Release EXE is too small and is probably the framework-dependent apphost stub."
+$releaseExeLength = (Get-Item -LiteralPath $singleFileExe).Length
+if ($releaseExeLength -lt 1000000 -or $releaseExeLength -gt 50000000) {
+    throw "Release EXE size $releaseExeLength is outside the expected framework-dependent single-file range."
 }
+Copy-Item -LiteralPath $singleFileExe -Destination $releaseExe -Force
 
 if (Test-Path $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
@@ -77,7 +78,7 @@ Compress-Archive -Path (Join-Path $publishDir "*") -DestinationPath $zipPath -Fo
 
 Write-Host "Published:"
 Write-Host "  $publishExe"
-Write-Host "  $standaloneExe"
+Write-Host "  $singleFileExe"
 Write-Host "  $releaseExe"
 Write-Host "  $zipPath"
 

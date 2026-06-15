@@ -2,14 +2,15 @@
 
 The release flow creates two Windows x64 artifacts:
 
-- `ElkaVoiceMeeterFxHost.exe`: a self-contained standalone EXE for direct
-  download from GitHub.
+- `ElkaVoiceMeeterFxHost.exe`: a compact framework-dependent single-file EXE
+  for direct download from GitHub. This requires the .NET 8 Desktop Runtime.
 - `ElkaVoiceMeeterFxHost-win-x64-framework-dependent.zip`: a smaller
   framework-dependent folder package. This requires the .NET 8 Desktop Runtime.
 
-The ZIP is the best package for normal installs because it keeps helper files
-visible beside the app. The standalone EXE is built separately so it is not the
-small framework-dependent apphost stub.
+The ZIP is the best package for full plugin-host testing because it keeps helper
+files visible beside the app. The direct EXE stays compact and framework
+dependent; it must not be the tiny apphost stub and it must not bundle the full
+.NET runtime.
 
 ## Local Publish
 
@@ -25,9 +26,9 @@ In Visual Studio, use the publish profile:
 src\app-wpf\Properties\PublishProfiles\win-x64-framework-dependent.pubxml
 ```
 
-That profile creates the release ZIP and the standalone release EXE, then uploads
+That profile creates the release ZIP and the compact direct EXE, then uploads
 both files to the GitHub release automatically. The default release tag is
-`v$(Version)` from the app project, for example `v0.2.0`.
+`v$(Version)` from the app project, for example `v0.7.0`.
 The upload log is written to:
 
 ```text
@@ -47,11 +48,11 @@ artifacts\release\ElkaVoiceMeeterFxHost-win-x64-framework-dependent.zip
 After the GitHub repo exists and `gh auth login` has been completed:
 
 ```powershell
-.\scripts\publish-release.ps1 -Tag v0.2.0 -Upload
+.\scripts\publish-release.ps1 -Tag v0.7.0 -Upload
 ```
 
 The script publishes locally first, then creates the release if it does not
-exist, and uploads both the zip and the standalone EXE with `--clobber`.
+exist, and uploads both the zip and the compact direct EXE with `--clobber`.
 
 Visual Studio uses the same idea directly from the publish profile. Before using
 the VS Publish button for upload, make sure GitHub CLI is installed and logged

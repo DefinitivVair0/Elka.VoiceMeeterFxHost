@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>0.6.0</Version>
+    <Version>0.7.0</Version>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <StartupObject>Elka.VoiceMeeterFxHost.App.Program</StartupObject>
@@ -41,8 +41,8 @@
     <ReleaseExePath Condition="'$(ReleaseExePath)' == ''">$(ReleaseDir)ElkaVoiceMeeterFxHost.exe</ReleaseExePath>
     <ReleaseZipPath Condition="'$(ReleaseZipPath)' == ''">$(ReleaseDir)ElkaVoiceMeeterFxHost-$(RuntimeIdentifier)-framework-dependent.zip</ReleaseZipPath>
     <ReleaseUploadLogPath Condition="'$(ReleaseUploadLogPath)' == ''">$(ReleaseDir)github-upload.log</ReleaseUploadLogPath>
-    <StandalonePublishDir Condition="'$(StandalonePublishDir)' == ''">$(RepoRoot)\artifacts\publish\ElkaVoiceMeeterFxHost\$(RuntimeIdentifier)-standalone\</StandalonePublishDir>
-    <StandalonePublishedExePath Condition="'$(StandalonePublishedExePath)' == ''">$(StandalonePublishDir)Elka.VoiceMeeterFxHost.App.exe</StandalonePublishedExePath>
+    <SingleFilePublishDir Condition="'$(SingleFilePublishDir)' == ''">$(RepoRoot)\artifacts\publish\ElkaVoiceMeeterFxHost\$(RuntimeIdentifier)-singlefile\</SingleFilePublishDir>
+    <SingleFilePublishedExePath Condition="'$(SingleFilePublishedExePath)' == ''">$(SingleFilePublishDir)Elka.VoiceMeeterFxHost.App.exe</SingleFilePublishedExePath>
     <PluginWorkerProject>$(RepoRoot)\src\plugin-worker\Elka.PluginWorker.csproj</PluginWorkerProject>
     <PluginWorkerOutputDir>$(RepoRoot)\src\plugin-worker\bin\$(Configuration)\net8.0-windows\$(RuntimeIdentifier)\</PluginWorkerOutputDir>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Insiders\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Insiders\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
@@ -120,16 +120,16 @@
     <MakeDir Directories="$(ReleaseDir)" />
     <Delete Files="$(ReleaseZipPath)" Condition="Exists('$(ReleaseZipPath)')" />
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;Compress-Archive -Path '$(PublishOutputDir)*' -DestinationPath '$(ReleaseZipPath)' -Force&quot;" />
-    <RemoveDir Directories="$(StandalonePublishDir)" Condition="Exists('$(StandalonePublishDir)')" />
-    <MakeDir Directories="$(StandalonePublishDir)" />
-    <Message Importance="high" Text="Creating standalone release EXE in $(StandalonePublishDir)" />
-    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c $(Configuration) -r $(RuntimeIdentifier) --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:IncludeAllContentForSelfExtract=true -p:ElkaCreateReleaseArtifacts=false -p:ElkaUploadGitHubRelease=false -o &quot;$(StandalonePublishDir)&quot;" />
-    <Error Condition="!Exists('$(StandalonePublishedExePath)')"
-           Text="Standalone publish did not create $(StandalonePublishedExePath)." />
-    <Copy SourceFiles="$(StandalonePublishedExePath)"
+    <RemoveDir Directories="$(SingleFilePublishDir)" Condition="Exists('$(SingleFilePublishDir)')" />
+    <MakeDir Directories="$(SingleFilePublishDir)" />
+    <Message Importance="high" Text="Creating framework-dependent single-file release EXE in $(SingleFilePublishDir)" />
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c $(Configuration) -r $(RuntimeIdentifier) --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:IncludeAllContentForSelfExtract=true -p:ElkaCreateReleaseArtifacts=false -p:ElkaUploadGitHubRelease=false -o &quot;$(SingleFilePublishDir)&quot;" />
+    <Error Condition="!Exists('$(SingleFilePublishedExePath)')"
+           Text="Single-file publish did not create $(SingleFilePublishedExePath)." />
+    <Copy SourceFiles="$(SingleFilePublishedExePath)"
           DestinationFiles="$(ReleaseExePath)"
           OverwriteReadOnlyFiles="true" />
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if ((Get-Item -LiteralPath '$(ReleaseExePath)').Length -lt 10000000) { throw 'Release EXE is too small and is probably the framework-dependent apphost stub.' }&quot;" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$length = (Get-Item -LiteralPath '$(ReleaseExePath)').Length; if ($length -lt 1000000 -or $length -gt 50000000) { throw ('Release EXE size ' + $length + ' is outside the expected framework-dependent single-file range.') }&quot;" />
     <Message Importance="high" Text="Release EXE: $(ReleaseExePath)" />
     <Message Importance="high" Text="Release ZIP: $(ReleaseZipPath)" />
   </Target>

@@ -352,9 +352,10 @@ artifacts\release\ElkaVoiceMeeterFxHost.exe
 artifacts\release\ElkaVoiceMeeterFxHost-win-x64-framework-dependent.zip
 ```
 
-The release EXE is self-contained for direct GitHub download. The ZIP is the
-smaller framework-dependent package and needs the .NET 8 Desktop Runtime
-installed on the target PC.
+The release EXE is a compact framework-dependent direct download and needs the
+.NET 8 Desktop Runtime installed on the target PC. The ZIP is the folder package
+and is the best choice when testing sandboxed plugin hosting because it keeps
+helper files beside the app.
 
 ## Architecture
 
