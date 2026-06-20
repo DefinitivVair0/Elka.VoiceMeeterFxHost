@@ -28,7 +28,7 @@ src\app-wpf\Properties\PublishProfiles\win-x64-framework-dependent.pubxml
 
 That profile creates the release ZIP and the compact direct EXE, then uploads
 both files to the GitHub release automatically. The default release tag is
-`v$(Version)` from the app project, for example `v0.7.0`.
+`v$(Version)` from the app project, for example `v0.7.1`.
 The upload log is written to:
 
 ```text
@@ -48,7 +48,7 @@ artifacts\release\ElkaVoiceMeeterFxHost-win-x64-framework-dependent.zip
 After the GitHub repo exists and `gh auth login` has been completed:
 
 ```powershell
-.\scripts\publish-release.ps1 -Tag v0.7.0 -Upload
+.\scripts\publish-release.ps1 -Tag v0.7.1 -Upload
 ```
 
 The script publishes locally first, then creates the release if it does not
