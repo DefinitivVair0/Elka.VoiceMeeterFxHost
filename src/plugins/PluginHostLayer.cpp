@@ -497,6 +497,36 @@ bool pathExtensionIs(const std::filesystem::path& path, const char* extension)
     return lowerAscii(path.extension().string()) == extension;
 }
 
+std::string normalizedFolderKey(const std::string& path)
+{
+    try
+    {
+        auto folder = std::filesystem::path(fromUtf8(path));
+        folder = std::filesystem::weakly_canonical(folder).lexically_normal();
+        return lowerAscii(toUtf8(folder.wstring()));
+    }
+    catch (...)
+    {
+        try
+        {
+            auto folder = std::filesystem::path(fromUtf8(path)).lexically_normal();
+            return lowerAscii(toUtf8(folder.wstring()));
+        }
+        catch (...)
+        {
+            return lowerAscii(path);
+        }
+    }
+}
+
+bool pathListContainsFolder(const std::vector<std::string>& paths, const std::string& path)
+{
+    const auto target = normalizedFolderKey(path);
+    return std::any_of(paths.begin(), paths.end(), [&target](const std::string& candidate) {
+        return normalizedFolderKey(candidate) == target;
+    });
+}
+
 bool isUnsupported32BitBinary(const std::filesystem::path& path) noexcept
 {
     DWORD binaryType = 0;
@@ -2191,11 +2221,13 @@ int PluginHostLayer::scanPluginPaths(const std::vector<std::string>& paths, bool
     if (scanVst3)
     {
         auto vst3Paths = defaultVst3SearchPaths();
+        auto vst2Paths = defaultVst2SearchPaths();
         std::vector<std::string> pathsForVst3;
         for (const auto& path : paths)
         {
-            if (std::find(vst3Paths.begin(), vst3Paths.end(), path) != vst3Paths.end() ||
-                lowerAscii(std::filesystem::path(path).string()).find("vst3") != std::string::npos)
+            const auto isDefaultVst3Path = pathListContainsFolder(vst3Paths, path);
+            const auto isDefaultVst2Path = pathListContainsFolder(vst2Paths, path);
+            if (isDefaultVst3Path || !isDefaultVst2Path)
             {
                 pathsForVst3.push_back(path);
             }
@@ -2221,12 +2253,13 @@ int PluginHostLayer::scanPluginPaths(const std::vector<std::string>& paths, bool
     if (scanVst2)
     {
         auto vst2Paths = defaultVst2SearchPaths();
+        auto vst3Paths = defaultVst3SearchPaths();
         std::vector<std::string> pathsForVst2;
         for (const auto& path : paths)
         {
-            if (std::find(vst2Paths.begin(), vst2Paths.end(), path) != vst2Paths.end() ||
-                lowerAscii(std::filesystem::path(path).string()).find("vst2") != std::string::npos ||
-                lowerAscii(std::filesystem::path(path).string()).find("vstplugins") != std::string::npos)
+            const auto isDefaultVst2Path = pathListContainsFolder(vst2Paths, path);
+            const auto isDefaultVst3Path = pathListContainsFolder(vst3Paths, path);
+            if (isDefaultVst2Path || !isDefaultVst3Path)
             {
                 pathsForVst2.push_back(path);
             }
