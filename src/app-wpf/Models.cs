@@ -364,6 +364,8 @@ internal sealed class PluginNodeSnapshot
 {
     public string Name { get; set; } = "VST";
     public int PluginIndex { get; set; } = -1;
+    public string PluginFormat { get; set; } = string.Empty;
+    public string PluginIdentifier { get; set; } = string.Empty;
     public string PluginStateBase64 { get; set; } = string.Empty;
     public string PluginPresetBase64 { get; set; } = string.Empty;
     public string PluginParameterStateBase64 { get; set; } = string.Empty;
@@ -771,7 +773,20 @@ internal sealed class NativeEngineClient : IDisposable
 
     public bool RefreshVoicemeeterParameters()
     {
-        return _attached && ElkaFx_RefreshVoicemeeterParameters() == 0;
+        if (!_attached)
+        {
+            return false;
+        }
+
+        try
+        {
+            return ElkaFx_RefreshVoicemeeterParameters() == 0;
+        }
+        catch (SEHException ex)
+        {
+            _lastStatus = $"VoiceMeeter parameter refresh failed: {ex.Message}";
+            return false;
+        }
     }
 
     public int GetPatchAsioChannel(int inputChannel)
@@ -802,7 +817,16 @@ internal sealed class NativeEngineClient : IDisposable
         }
 
         var status = new StringBuilder(1024);
-        ElkaFx_ProbeInsertAsio(ExpectedInsertAsioChannelCount(kind), status, status.Capacity);
+        try
+        {
+            ElkaFx_ProbeInsertAsio(ExpectedInsertAsioChannelCount(kind), status, status.Capacity);
+        }
+        catch (SEHException ex)
+        {
+            status.Clear();
+            status.Append($"Insert ASIO probe failed: {ex.Message}");
+        }
+
         _lastStatus = status.ToString();
         return _lastStatus;
     }
@@ -815,7 +839,16 @@ internal sealed class NativeEngineClient : IDisposable
         }
 
         var status = new StringBuilder(1024);
-        ElkaFx_StartInsertAsio(ExpectedInsertAsioChannelCount(kind), status, status.Capacity);
+        try
+        {
+            ElkaFx_StartInsertAsio(ExpectedInsertAsioChannelCount(kind), status, status.Capacity);
+        }
+        catch (SEHException ex)
+        {
+            status.Clear();
+            status.Append($"Insert ASIO start failed: {ex.Message}");
+        }
+
         _lastStatus = status.ToString();
         return _lastStatus;
     }
@@ -829,13 +862,49 @@ internal sealed class NativeEngineClient : IDisposable
         }
 
         var status = new StringBuilder(1024);
-        var result = ElkaFx_RestartInsertAsioIfFormatChanged(ExpectedInsertAsioChannelCount(kind), status, status.Capacity);
+        int result;
+        try
+        {
+            result = ElkaFx_RestartInsertAsioIfFormatChanged(ExpectedInsertAsioChannelCount(kind), status, status.Capacity);
+        }
+        catch (SEHException ex)
+        {
+            status.Clear();
+            status.Append($"Insert ASIO format monitor failed: {ex.Message}");
+            result = -1;
+        }
+
         restartStatus = status.ToString();
         if (result != 0)
         {
             _lastStatus = restartStatus;
         }
 
+        return result;
+    }
+
+    public int CheckInsertAsioFormatChanged(out string checkStatus)
+    {
+        if (!_attached)
+        {
+            checkStatus = _lastStatus;
+            return -1;
+        }
+
+        var status = new StringBuilder(1024);
+        int result;
+        try
+        {
+            result = ElkaFx_CheckInsertAsioFormatChanged(status, status.Capacity);
+        }
+        catch (SEHException ex)
+        {
+            status.Clear();
+            status.Append($"Insert ASIO format check failed: {ex.Message}");
+            result = -1;
+        }
+
+        checkStatus = status.ToString();
         return result;
     }
 
@@ -865,6 +934,7 @@ internal sealed class NativeEngineClient : IDisposable
     }
 
     public bool IsInsertAsioRunning => _attached && ElkaFx_IsInsertAsioRunning() != 0;
+    public bool IsInsertAsioOpen => _attached && ElkaFx_IsInsertAsioOpen() != 0;
 
     private static int ExpectedInsertAsioChannelCount(VoicemeeterKind kind)
     {
@@ -1059,6 +1129,8 @@ internal sealed class NativeEngineClient : IDisposable
         return new PluginNodeSnapshot
         {
             PluginIndex = choice.Index,
+            PluginFormat = choice.Format,
+            PluginIdentifier = choice.Identifier,
             Slot = slot,
             Name = choice.Name,
             X = x,
@@ -1121,16 +1193,32 @@ internal sealed class NativeEngineClient : IDisposable
             return false;
         }
 
-        var required = Math.Clamp(ElkaFx_GetPluginNodeStateLength(slot), 1, 16 * 1024 * 1024);
-        var builder = new StringBuilder(required);
-        if (ElkaFx_GetPluginNodeState(slot, builder, builder.Capacity) != 0)
+        try
         {
+            var length = ElkaFx_GetPluginNodeStateLength(slot);
+            if (length <= 0)
+            {
+                state = string.Empty;
+                return false;
+            }
+
+            var required = Math.Clamp(length, 1, 16 * 1024 * 1024);
+            var builder = new StringBuilder(required);
+            if (ElkaFx_GetPluginNodeState(slot, builder, builder.Capacity) != 0)
+            {
+                state = string.Empty;
+                return false;
+            }
+
+            state = builder.ToString();
+            return true;
+        }
+        catch (SEHException ex)
+        {
+            _lastStatus = $"Plugin state capture failed: {ex.Message}";
             state = string.Empty;
             return false;
         }
-
-        state = builder.ToString();
-        return true;
     }
 
     public string GetPluginNodePreset(int slot)
@@ -1146,23 +1234,46 @@ internal sealed class NativeEngineClient : IDisposable
             return false;
         }
 
-        var required = Math.Clamp(ElkaFx_GetPluginNodePresetLength(slot), 1, 32 * 1024 * 1024);
-        var builder = new StringBuilder(required);
-        if (ElkaFx_GetPluginNodePreset(slot, builder, builder.Capacity) != 0)
+        try
         {
+            var length = ElkaFx_GetPluginNodePresetLength(slot);
+            if (length <= 0)
+            {
+                preset = string.Empty;
+                return false;
+            }
+
+            var required = Math.Clamp(length, 1, 32 * 1024 * 1024);
+            var builder = new StringBuilder(required);
+            if (ElkaFx_GetPluginNodePreset(slot, builder, builder.Capacity) != 0)
+            {
+                preset = string.Empty;
+                return false;
+            }
+
+            preset = builder.ToString();
+            return true;
+        }
+        catch (SEHException ex)
+        {
+            _lastStatus = $"Plugin preset capture failed: {ex.Message}";
             preset = string.Empty;
             return false;
         }
-
-        preset = builder.ToString();
-        return true;
     }
 
     public bool SetPluginNodeState(int slot, string? stateBase64)
     {
         if (_attached && !string.IsNullOrWhiteSpace(stateBase64))
         {
-            return ElkaFx_SetPluginNodeState(slot, stateBase64) == 0;
+            try
+            {
+                return ElkaFx_SetPluginNodeState(slot, stateBase64) == 0;
+            }
+            catch (SEHException ex)
+            {
+                _lastStatus = $"Plugin state restore failed: {ex.Message}";
+            }
         }
 
         return false;
@@ -1172,7 +1283,14 @@ internal sealed class NativeEngineClient : IDisposable
     {
         if (_attached && !string.IsNullOrWhiteSpace(presetBase64))
         {
-            return ElkaFx_SetPluginNodePreset(slot, presetBase64) == 0;
+            try
+            {
+                return ElkaFx_SetPluginNodePreset(slot, presetBase64) == 0;
+            }
+            catch (SEHException ex)
+            {
+                _lastStatus = $"Plugin preset restore failed: {ex.Message}";
+            }
         }
 
         return false;
@@ -1191,23 +1309,46 @@ internal sealed class NativeEngineClient : IDisposable
             return false;
         }
 
-        var required = Math.Clamp(ElkaFx_GetPluginNodeParameterStateLength(slot), 1, 32 * 1024 * 1024);
-        var builder = new StringBuilder(required);
-        if (ElkaFx_GetPluginNodeParameterState(slot, builder, builder.Capacity) != 0)
+        try
         {
+            var length = ElkaFx_GetPluginNodeParameterStateLength(slot);
+            if (length <= 0)
+            {
+                parameterState = string.Empty;
+                return false;
+            }
+
+            var required = Math.Clamp(length, 1, 32 * 1024 * 1024);
+            var builder = new StringBuilder(required);
+            if (ElkaFx_GetPluginNodeParameterState(slot, builder, builder.Capacity) != 0)
+            {
+                parameterState = string.Empty;
+                return false;
+            }
+
+            parameterState = builder.ToString();
+            return true;
+        }
+        catch (SEHException ex)
+        {
+            _lastStatus = $"Plugin parameter capture failed: {ex.Message}";
             parameterState = string.Empty;
             return false;
         }
-
-        parameterState = builder.ToString();
-        return true;
     }
 
     public bool SetPluginNodeParameterState(int slot, string? parameterStateBase64)
     {
         if (_attached && !string.IsNullOrWhiteSpace(parameterStateBase64))
         {
-            return ElkaFx_SetPluginNodeParameterState(slot, parameterStateBase64) == 0;
+            try
+            {
+                return ElkaFx_SetPluginNodeParameterState(slot, parameterStateBase64) == 0;
+            }
+            catch (SEHException ex)
+            {
+                _lastStatus = $"Plugin parameter restore failed: {ex.Message}";
+            }
         }
 
         return false;
@@ -1399,6 +1540,9 @@ internal sealed class NativeEngineClient : IDisposable
     private static extern int ElkaFx_RestartInsertAsioIfFormatChanged(int expectedChannelCount, StringBuilder status, int statusChars);
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_CheckInsertAsioFormatChanged(StringBuilder status, int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern void ElkaFx_StopInsertAsio(StringBuilder status, int statusChars);
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
@@ -1406,6 +1550,9 @@ internal sealed class NativeEngineClient : IDisposable
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_IsInsertAsioRunning();
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_IsInsertAsioOpen();
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_SetPatchInsertEnabled(int inputChannel, int enabled);

@@ -48,7 +48,6 @@ public partial class MainWindow : Window
     private bool? _lastSelectedPatchBypassState;
     private bool _updatingInsertAsioControls;
     private bool _insertAsioFormatRestartInProgress;
-    private DateTimeOffset _lastInsertAsioFormatCheck = DateTimeOffset.MinValue;
     private string? _draggingEndpointKey;
     private CallbackMode _draggingEndpointMode = CallbackMode.None;
     private IoEndpoint? _draggingEndpoint;
@@ -1588,63 +1587,67 @@ public partial class MainWindow : Window
 
     private void MaybeRestartInsertAsioAfterFormatChange()
     {
-        if (!_engine.IsInsertAsioRunning || _insertAsioFormatRestartInProgress)
+        if (_insertAsioFormatRestartInProgress)
         {
             return;
         }
 
-        var now = DateTimeOffset.Now;
-        if (now - _lastInsertAsioFormatCheck < TimeSpan.FromSeconds(1))
+        if (!_engine.IsInsertAsioOpen && !_settings.InsertAsioAutoStart)
         {
             return;
         }
 
-        _lastInsertAsioFormatCheck = now;
         _insertAsioFormatRestartInProgress = true;
-        var kind = _kind;
-
-        System.Threading.Tasks.Task
-            .Run(() =>
+        try
+        {
+            if (!_engine.IsInsertAsioOpen && _settings.InsertAsioAutoStart)
             {
-                var result = _engine.RestartInsertAsioIfFormatChanged(kind, out var restartStatus);
-                return (result, restartStatus);
-            })
-            .ContinueWith(task =>
+                RestartInsertAsioLikeButtons("closed after format change");
+                return;
+            }
+
+            var result = _engine.CheckInsertAsioFormatChanged(out var formatStatus);
+            if (result == 0)
             {
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    try
-                    {
-                        if (task.IsFaulted)
-                        {
-                            var message = task.Exception?.GetBaseException().Message ?? "unknown error";
-                            AppendLog($"Insert ASIO format monitor failed: {message}");
-                            return;
-                        }
+                return;
+            }
 
-                        var (result, restartStatus) = task.Result;
-                        if (result == 0)
-                        {
-                            return;
-                        }
+            if (result < 0)
+            {
+                InsertAsioStatusTextBlock.Text = formatStatus;
+                AppendLog($"Insert ASIO format check failed: {formatStatus}");
+                return;
+            }
 
-                        InsertAsioStatusTextBlock.Text = restartStatus;
-                        AppendLog(result > 0
-                            ? restartStatus
-                            : $"Insert ASIO format monitor restart failed: {restartStatus}");
+            AppendLog(formatStatus);
+            RestartInsertAsioLikeButtons("format change");
+        }
+        finally
+        {
+            _insertAsioFormatRestartInProgress = false;
+        }
+    }
 
-                        if (result > 0)
-                        {
-                            ApplyInsertAsioPatchSelection();
-                            RefreshEndpointButtonSelection();
-                        }
-                    }
-                    finally
-                    {
-                        _insertAsioFormatRestartInProgress = false;
-                    }
-                }));
-            });
+    private void RestartInsertAsioLikeButtons(string reason)
+    {
+        var stopStatus = _engine.StopInsertAsio();
+        InsertAsioStatusTextBlock.Text = stopStatus;
+        AppendLog($"Insert ASIO auto-restart ({reason}) stop: {stopStatus}");
+
+        var startStatus = _engine.StartInsertAsio(_kind);
+        InsertAsioStatusTextBlock.Text = startStatus;
+        AppendLog($"Insert ASIO auto-restart ({reason}) start: {startStatus}");
+
+        if (_engine.IsInsertAsioRunning)
+        {
+            ApplyInsertAsioPatchSelection();
+            RefreshEndpointButtonSelection();
+            _settings.InsertAsioAutoStart = true;
+            SetInsertAsioAutoStartCheckBox(true);
+            QueueSave();
+        }
+
+        RefreshAfterInsertAsioStateChange();
     }
 
     private void ShowPluginScanWindow()
@@ -2488,17 +2491,17 @@ public partial class MainWindow : Window
 
     private Brush WireStrokeBrush(string? hueKey)
     {
-        return HueStrokeBrush(hueKey) ?? (Brush)FindResource("RouteAccentBrush");
+        return HueStrokeBrush(hueKey) ?? ThemeBrushOr("RouteAccentBrush", "#55C27A");
     }
 
     private Brush NodeBackgroundBrush(PluginNodeSnapshot node)
     {
         if (node.Bypassed)
         {
-            return (Brush)FindResource("NeutralBrush");
+            return ThemeBrushOr("NeutralBrush", "#26313A");
         }
 
-        return HueFillBrush(SourceHueKeyForNode(node.Slot, [])) ?? (Brush)FindResource("RouteActiveBrush");
+        return HueFillBrush(SourceHueKeyForNode(node.Slot, [])) ?? ThemeBrushOr("RouteActiveBrush", "#14392F");
     }
 
     private static SolidColorBrush BrushFromHex(string hex)
@@ -5155,24 +5158,75 @@ public partial class MainWindow : Window
     private static PluginChoice? SavedPluginChoice(PluginNodeSnapshot savedNode, IReadOnlyList<PluginChoice> choices)
     {
         var savedBaseName = PluginDisplayBaseName(savedNode.Name);
+        var savedFormat = CanonicalPluginFormat(savedNode.PluginFormat);
+        var savedIdentifier = CanonicalPluginIdentifier(savedNode.PluginIdentifier);
+
+        bool FormatMatches(PluginChoice choice)
+        {
+            return string.IsNullOrWhiteSpace(savedFormat) ||
+                   CanonicalPluginFormat(choice.Format).Equals(savedFormat, StringComparison.Ordinal);
+        }
+
+        if (!string.IsNullOrWhiteSpace(savedIdentifier))
+        {
+            return choices.FirstOrDefault(choice =>
+                CanonicalPluginIdentifier(choice.Identifier).Equals(savedIdentifier, StringComparison.Ordinal) &&
+                FormatMatches(choice));
+        }
+
         var byIndexAndName = choices.FirstOrDefault(choice =>
             choice.Index == savedNode.PluginIndex &&
-            PluginDisplayBaseName(choice.Name).Equals(savedBaseName, StringComparison.OrdinalIgnoreCase));
+            PluginDisplayBaseName(choice.Name).Equals(savedBaseName, StringComparison.OrdinalIgnoreCase) &&
+            FormatMatches(choice));
         if (byIndexAndName is not null)
         {
             return byIndexAndName;
         }
 
         var byName = choices.FirstOrDefault(choice =>
-            PluginDisplayBaseName(choice.Name).Equals(savedBaseName, StringComparison.OrdinalIgnoreCase));
+            PluginDisplayBaseName(choice.Name).Equals(savedBaseName, StringComparison.OrdinalIgnoreCase) &&
+            FormatMatches(choice));
         if (byName is not null)
         {
             return byName;
         }
 
-        return savedNode.PluginIndex >= 0
-            ? choices.FirstOrDefault(choice => choice.Index == savedNode.PluginIndex)
-            : null;
+        return null;
+    }
+
+    private static string CanonicalPluginFormat(string? format)
+    {
+        var value = (format ?? string.Empty).Trim();
+        if (value.Equals("VST", StringComparison.OrdinalIgnoreCase))
+        {
+            value = "VST2";
+        }
+
+        return value.ToUpperInvariant();
+    }
+
+    private static string CanonicalPluginIdentifier(string? identifier)
+    {
+        var value = (identifier ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        value = value.Replace('/', '\\');
+        try
+        {
+            if (value.Contains(":\\", StringComparison.Ordinal) || value.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                value = System.IO.Path.GetFullPath(value);
+            }
+        }
+        catch
+        {
+            // Some plugin identifiers are not filesystem paths. Keep the raw identifier normalized.
+        }
+
+        return value.TrimEnd('\\').ToUpperInvariant();
     }
 
     private static void ApplySavedNodeVisualState(PluginNodeSnapshot restored, PluginNodeSnapshot saved)
@@ -5185,7 +5239,7 @@ public partial class MainWindow : Window
         restored.PinsCollapsed = saved.PinsCollapsed;
         restored.Sandboxed = restored.Sandboxed ||
                              saved.Sandboxed ||
-                             PluginProbeGuard.RequiresSandboxedHosting(new PluginChoice(restored.PluginIndex, restored.Name, string.Empty));
+                             PluginProbeGuard.RequiresSandboxedHosting(new PluginChoice(restored.PluginIndex, restored.Name, restored.PluginFormat, restored.PluginIdentifier));
         restored.PluginStateBase64 = saved.PluginStateBase64;
         restored.PluginPresetBase64 = saved.PluginPresetBase64;
         restored.PluginParameterStateBase64 = saved.PluginParameterStateBase64;
@@ -5335,6 +5389,8 @@ public partial class MainWindow : Window
         {
             Name = node.Name,
             PluginIndex = node.PluginIndex,
+            PluginFormat = node.PluginFormat,
+            PluginIdentifier = node.PluginIdentifier,
             PluginStateBase64 = node.PluginStateBase64,
             PluginPresetBase64 = node.PluginPresetBase64,
             PluginParameterStateBase64 = node.PluginParameterStateBase64,
@@ -7103,7 +7159,7 @@ public partial class MainWindow : Window
             }
 
             var copy = _engine.AddPluginNode(
-                new PluginChoice(member.PluginIndex, member.Name, string.Empty),
+                new PluginChoice(member.PluginIndex, member.Name, member.PluginFormat, member.PluginIdentifier),
                 member.Mode,
                 member.MainInputPins,
                 member.SidechainInputPins,
@@ -7120,6 +7176,8 @@ public partial class MainWindow : Window
             }
 
             copy.Name = UniquePluginNodeName(member.Name);
+            copy.PluginFormat = member.PluginFormat;
+            copy.PluginIdentifier = member.PluginIdentifier;
             copy.PluginStateBase64 = member.PluginStateBase64;
             copy.PluginPresetBase64 = member.PluginPresetBase64;
             copy.PluginParameterStateBase64 = member.PluginParameterStateBase64;
@@ -7317,7 +7375,7 @@ public partial class MainWindow : Window
         var safeSidechainInputs = Math.Clamp(sidechainInputPins, 0, 32 - safeMainInputs);
         var safeOutputs = Math.Clamp(outputPins, 1, 8);
         var replacement = _engine.AddPluginNode(
-            new PluginChoice(node.PluginIndex, node.Name, string.Empty),
+            new PluginChoice(node.PluginIndex, node.Name, node.PluginFormat, node.PluginIdentifier),
             node.Mode,
             safeMainInputs,
             safeSidechainInputs,
@@ -7336,6 +7394,8 @@ public partial class MainWindow : Window
 
         _engine.RemovePluginNode(node.Slot);
         node.Slot = replacement.Slot;
+        node.PluginFormat = replacement.PluginFormat;
+        node.PluginIdentifier = replacement.PluginIdentifier;
         node.InputPins = replacement.InputPins;
         node.OutputPins = replacement.OutputPins;
         node.MainInputPins = Math.Clamp(safeMainInputs, 1, node.InputPins);

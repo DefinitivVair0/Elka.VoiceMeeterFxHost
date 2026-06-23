@@ -198,14 +198,30 @@ void InsertAsioHost::stop(std::wstring& status) noexcept
     status = L"Insert ASIO host stopped.";
 }
 
+bool InsertAsioHost::isOpen() const
+{
+    std::lock_guard lock(deviceMutex);
+    return device != nullptr;
+}
+
 void InsertAsioHost::status(std::wstring& status) const
 {
     std::lock_guard lock(deviceMutex);
     if (!running.load(std::memory_order_acquire))
     {
-        status = lastError.empty()
-            ? L"Insert ASIO host stopped."
-            : L"Insert ASIO host stopped: " + lastError;
+        if (device != nullptr)
+        {
+            status = lastError.empty()
+                ? L"Insert ASIO host stopped while the ASIO device is still open."
+                : L"Insert ASIO host stopped while the ASIO device is still open: " + lastError;
+        }
+        else
+        {
+            status = lastError.empty()
+                ? L"Insert ASIO host stopped."
+                : L"Insert ASIO host stopped: " + lastError;
+        }
+
         return;
     }
 
