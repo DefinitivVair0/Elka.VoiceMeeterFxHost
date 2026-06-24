@@ -27,6 +27,7 @@ internal sealed class PluginGroupPropertiesWindow : Window
     private readonly Func<int, int, int, int, bool> _toggleModuleRoute;
     private readonly Action<PluginNodeSnapshot> _removePluginNode;
     private readonly Action<PluginNodeSnapshot> _openPluginEditor;
+    private readonly Action<PluginNodeSnapshot, bool> _setPluginNodeBypass;
     private readonly Dictionary<int, Point> _originalNodePositions;
     private readonly List<CanvasConnectionSnapshot> _originalConnections;
     private readonly TextBox _nameTextBox = new();
@@ -57,7 +58,8 @@ internal sealed class PluginGroupPropertiesWindow : Window
         IList<CanvasConnectionSnapshot> connections,
         Func<int, int, int, int, bool> toggleModuleRoute,
         Action<PluginNodeSnapshot> removePluginNode,
-        Action<PluginNodeSnapshot> openPluginEditor)
+        Action<PluginNodeSnapshot> openPluginEditor,
+        Action<PluginNodeSnapshot, bool> setPluginNodeBypass)
     {
         _group = group;
         _members = members.ToList();
@@ -65,6 +67,7 @@ internal sealed class PluginGroupPropertiesWindow : Window
         _toggleModuleRoute = toggleModuleRoute;
         _removePluginNode = removePluginNode;
         _openPluginEditor = openPluginEditor;
+        _setPluginNodeBypass = setPluginNodeBypass;
         _originalNodePositions = _members.ToDictionary(static node => node.Slot, static node => new Point(node.X, node.Y));
         _originalConnections = GroupConnections().Select(CloneConnection).ToList();
 
@@ -447,6 +450,7 @@ internal sealed class PluginGroupPropertiesWindow : Window
     {
         var menu = new ContextMenu();
         menu.Items.Add(CreateMenuItem("Open Editor", () => _openPluginEditor(node)));
+        menu.Items.Add(CreateMenuItem(node.Bypassed ? "Turn On" : "Shut Off / Bypass", () => SetNodeBypass(node, !node.Bypassed)));
         menu.Items.Add(new Separator());
         menu.Items.Add(CreateMenuItem("Remove From Group", () => RemoveNodeFromGroup(node)));
         menu.Items.Add(new Separator());
@@ -461,6 +465,12 @@ internal sealed class PluginGroupPropertiesWindow : Window
         var item = new MenuItem { Header = header };
         item.Click += (_, _) => action();
         return item;
+    }
+
+    private void SetNodeBypass(PluginNodeSnapshot node, bool bypassed)
+    {
+        _setPluginNodeBypass(node, bypassed);
+        RebuildCanvas();
     }
 
     private void RemoveNodeFromGroup(PluginNodeSnapshot node)

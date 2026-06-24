@@ -460,13 +460,21 @@ internal static class FxHostSettingsStore
     {
         try
         {
-            if (!File.Exists(SettingsPath))
+            var path = ExistingSettingsPath();
+            if (string.IsNullOrWhiteSpace(path))
             {
                 return new FxHostSettings();
             }
 
-            return JsonSerializer.Deserialize<FxHostSettings>(File.ReadAllText(SettingsPath), JsonOptions)
+            var settings = JsonSerializer.Deserialize<FxHostSettings>(File.ReadAllText(path), JsonOptions)
                 ?? new FxHostSettings();
+
+            if (!string.Equals(path, SettingsPath, StringComparison.OrdinalIgnoreCase))
+            {
+                Save(settings);
+            }
+
+            return settings;
         }
         catch
         {
@@ -489,10 +497,21 @@ internal static class FxHostSettingsStore
         }
     }
 
-    private static string SettingsDirectory =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ElkaVoiceMeeterFxHost");
+    private static string SettingsDirectory => AppDataPaths.RoamingRoot;
 
     private static string SettingsPath => Path.Combine(SettingsDirectory, "wpf-main-window.json");
+
+    private static string LegacySettingsPath => Path.Combine(AppDataPaths.LegacyLocalRoot, "wpf-main-window.json");
+
+    private static string ExistingSettingsPath()
+    {
+        if (File.Exists(SettingsPath))
+        {
+            return SettingsPath;
+        }
+
+        return File.Exists(LegacySettingsPath) ? LegacySettingsPath : string.Empty;
+    }
 }
 
 internal sealed class NativeEngineClient : IDisposable

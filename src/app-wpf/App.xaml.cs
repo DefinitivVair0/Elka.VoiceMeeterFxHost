@@ -74,7 +74,7 @@ internal static class StartupCrashLogger
     }
 
     public static string CrashLogDirectory =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ElkaVoiceMeeterFxHost");
+        AppDataPaths.LocalRoot;
 
     public static string CrashLogPath => Path.Combine(CrashLogDirectory, "startup-crash.log");
 }
@@ -97,7 +97,7 @@ internal static class RuntimeLog
     }
 
     public static string LogDirectory =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ElkaVoiceMeeterFxHost");
+        AppDataPaths.LocalRoot;
 
     public static string LogPath => Path.Combine(LogDirectory, "runtime.log");
 }

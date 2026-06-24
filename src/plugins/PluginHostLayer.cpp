@@ -86,12 +86,20 @@ void addIfDirectoryExists(std::vector<std::string>& paths, const std::wstring& p
 juce::File pluginCacheFile()
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("Elka")
+        .getChildFile("ElkaSoft")
         .getChildFile("VoiceMeeterFxHost")
         .getChildFile("plugin-cache.xml");
 }
 
 juce::File legacyPluginCacheFile()
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Elka")
+        .getChildFile("VoiceMeeterFxHost")
+        .getChildFile("plugin-cache.xml");
+}
+
+juce::File legacyVst3PluginCacheFile()
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
         .getChildFile("Elka")
@@ -2812,6 +2820,9 @@ void PluginHostLayer::loadCachedPlugins()
     auto file = pluginCacheFile();
     if (!file.existsAsFile())
         file = legacyPluginCacheFile();
+
+    if (!file.existsAsFile())
+        file = legacyVst3PluginCacheFile();
 
     if (!file.existsAsFile())
         return;

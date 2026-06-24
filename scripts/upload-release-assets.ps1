@@ -12,6 +12,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ExePath,
 
+    [Parameter(Mandatory = $false)]
+    [string]$InstallerPath = "",
+
     [Parameter(Mandatory = $true)]
     [string]$LogPath
 )
@@ -56,12 +59,19 @@ if (!(Test-Path -LiteralPath $ExePath)) {
     throw "Release EXE not found: $ExePath"
 }
 
+if (![string]::IsNullOrWhiteSpace($InstallerPath) -and !(Test-Path -LiteralPath $InstallerPath)) {
+    throw "Release installer not found: $InstallerPath"
+}
+
 $gh = Get-GitHubCliPath
 Write-UploadLog "Using GitHub CLI: $gh"
 Write-UploadLog "Repository: $Repository"
 Write-UploadLog "Release tag: $Tag"
 Write-UploadLog "ZIP: $ZipPath"
 Write-UploadLog "EXE: $ExePath"
+if (![string]::IsNullOrWhiteSpace($InstallerPath)) {
+    Write-UploadLog "Installer: $InstallerPath"
+}
 
 
 & $gh auth status
@@ -101,6 +111,9 @@ if ($LASTEXITCODE -eq 0 -and ![string]::IsNullOrWhiteSpace($releaseJson)) {
 }
 
 $uploadAssets = @($ZipPath, $ExePath)
+if (![string]::IsNullOrWhiteSpace($InstallerPath)) {
+    $uploadAssets += $InstallerPath
+}
 & $gh release upload $Tag --repo $Repository @uploadAssets --clobber
 if ($LASTEXITCODE -ne 0) {
     throw "GitHub release upload failed with exit code $LASTEXITCODE."

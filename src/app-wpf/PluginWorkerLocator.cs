@@ -123,8 +123,7 @@ internal static class PluginWorkerLocator
     {
         var version = typeof(PluginWorkerLocator).Assembly.GetName().Version?.ToString() ?? "current";
         return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ElkaVoiceMeeterFxHost",
+            AppDataPaths.LocalRoot,
             "PluginWorker",
             version);
     }

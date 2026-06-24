@@ -6,6 +6,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
+using Forms = System.Windows.Forms;
 
 namespace Elka.VoiceMeeterFxHost.App;
 
@@ -79,6 +80,11 @@ public partial class MainWindow : Window
     private DateTimeOffset _lastRealtimeCallbackActivityAt;
     private DateTimeOffset _lastRealtimeFormatChangeAt;
     private DateTimeOffset _lastRealtimeCallbackRearmAt;
+    private Forms.NotifyIcon? _trayIcon;
+    private System.Drawing.Icon? _trayIconHandle;
+    private WindowState _windowStateBeforeTray = WindowState.Normal;
+    private bool _isShuttingDown;
+    private bool _trayCloseHintShown;
 
     private const int DefaultVbanControlPort = 6981;
     private const string DefaultVbanControlStreamName = "Command1";
@@ -157,6 +163,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        InitializeTrayIcon();
 
         _saveTimer = new DispatcherTimer
         {
@@ -234,6 +241,94 @@ public partial class MainWindow : Window
                 new Action(() => StartInsertAsioFromUi(rememberRunning: true)),
                 DispatcherPriority.ApplicationIdle);
         }
+    }
+
+    private void InitializeTrayIcon()
+    {
+        if (_trayIcon is not null)
+        {
+            return;
+        }
+
+        _trayIconHandle = CreateTrayIcon();
+        var menu = new Forms.ContextMenuStrip();
+        menu.Items.Add("Open", null, (_, _) => Dispatcher.BeginInvoke(new Action(RestoreFromTray)));
+        menu.Items.Add(new Forms.ToolStripSeparator());
+        menu.Items.Add("Shutdown", null, (_, _) => Dispatcher.BeginInvoke(new Action(ShutdownFromTray)));
+
+        _trayIcon = new Forms.NotifyIcon
+        {
+            Text = "Elka VoiceMeeter FX Host",
+            Icon = _trayIconHandle,
+            ContextMenuStrip = menu,
+            Visible = true
+        };
+        _trayIcon.DoubleClick += (_, _) => Dispatcher.BeginInvoke(new Action(RestoreFromTray));
+    }
+
+    private static System.Drawing.Icon CreateTrayIcon()
+    {
+        var processPath = Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(processPath) && System.IO.File.Exists(processPath))
+        {
+            var icon = System.Drawing.Icon.ExtractAssociatedIcon(processPath);
+            if (icon is not null)
+            {
+                return icon;
+            }
+        }
+
+        return (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone();
+    }
+
+    private void HideToTray()
+    {
+        _windowStateBeforeTray = WindowState == WindowState.Minimized ? WindowState.Normal : WindowState;
+        ShowInTaskbar = false;
+        Hide();
+
+        if (!_trayCloseHintShown)
+        {
+            _trayIcon?.ShowBalloonTip(
+                2500,
+                "Elka VoiceMeeter FX Host",
+                "Still running in the tray. Right-click the tray icon to open or shut down.",
+                Forms.ToolTipIcon.Info);
+            _trayCloseHintShown = true;
+        }
+    }
+
+    private void RestoreFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+        WindowState = _windowStateBeforeTray;
+        Activate();
+    }
+
+    private void ShutdownFromTray()
+    {
+        _isShuttingDown = true;
+        if (_trayIcon is not null)
+        {
+            _trayIcon.Visible = false;
+        }
+
+        Close();
+    }
+
+    private void DisposeTrayIcon()
+    {
+        if (_trayIcon is not null)
+        {
+            _trayIcon.Visible = false;
+            _trayIcon.ContextMenuStrip?.Dispose();
+            _trayIcon.Dispose();
+            _trayIcon = null;
+        }
+
+        _trayIconHandle?.Dispose();
+        _trayIconHandle = null;
     }
 
     private sealed class CanvasPinInfo
@@ -5731,6 +5826,7 @@ public partial class MainWindow : Window
     {
         node.Bypassed = bypassed;
         _engine.SetPluginNodeBypassed(node.Slot, bypassed);
+        RebuildVstNodeList();
         RebuildRoutingCanvas();
         QueueSave();
     }
@@ -6316,7 +6412,9 @@ public partial class MainWindow : Window
         {
             Width = VstGroupWidth,
             Height = height,
-            Background = (Brush)FindResource("PanelBrush"),
+            Background = GroupIsBypassed(members)
+                ? ThemeBrushOr("NeutralBrush", "#26313A")
+                : (Brush)FindResource("PanelBrush"),
             BorderBrush = selected
                 ? (Brush)FindResource("VolumeAccentBrush")
                 : (Brush)FindResource("RouteAccentBrush"),
@@ -6349,7 +6447,7 @@ public partial class MainWindow : Window
         });
         stack.Children.Add(new TextBlock
         {
-            Text = members.Count == 1 ? "1 VST" : $"{members.Count} VSTs",
+            Text = GroupStatusText(members),
             Style = (Style)FindResource("MutedText"),
             Margin = new Thickness(0, 4, 0, 0),
             TextTrimming = TextTrimming.CharacterEllipsis
@@ -6522,6 +6620,16 @@ public partial class MainWindow : Window
         menu.Items.Add(CreateNodeMenuItem("Open Group", () => ShowGroupProperties(group)));
         menu.Items.Add(CreateNodeMenuItem("Properties", () => ShowGroupProperties(group)));
         menu.Items.Add(CreateNodeMenuItem("Copy Group", () => CopyPluginGroup(group)));
+
+        var members = GroupMembers(group).ToList();
+        var groupBypassed = GroupIsBypassed(members);
+        var bypass = CreateNodeMenuItem(groupBypassed ? "Turn On Group" : "Shut Off / Bypass Group", () => SetGroupBypass(group, !groupBypassed));
+        if (members.Count == 0)
+        {
+            bypass.IsEnabled = false;
+            bypass.ToolTip = "Add VSTs to the group before bypassing it.";
+        }
+        menu.Items.Add(bypass);
         menu.Items.Add(new Separator());
         menu.Items.Add(CreateNodeMenuItem(group.PinsCollapsed ? "Expand Pins" : "Minimize Pins", () => SetGroupPinsCollapsed(group, !group.PinsCollapsed)));
         menu.Items.Add(new Separator());
@@ -6532,6 +6640,38 @@ public partial class MainWindow : Window
         remove.Foreground = (Brush)FindResource("DangerBrush");
         menu.Items.Add(remove);
         return menu;
+    }
+
+    private static bool GroupIsBypassed(IReadOnlyCollection<PluginNodeSnapshot> members)
+    {
+        return members.Count > 0 && members.All(static node => node.Bypassed);
+    }
+
+    private static string GroupStatusText(IReadOnlyCollection<PluginNodeSnapshot> members)
+    {
+        var label = members.Count == 1 ? "1 VST" : $"{members.Count} VSTs";
+        return GroupIsBypassed(members) ? $"{label} off / bypass" : label;
+    }
+
+    private void SetGroupBypass(PluginGroupSnapshot group, bool bypassed)
+    {
+        var members = GroupMembers(group).ToList();
+        if (members.Count == 0)
+        {
+            AppendLog($"{group.Name}: no VSTs to shut off.");
+            return;
+        }
+
+        foreach (var member in members)
+        {
+            member.Bypassed = bypassed;
+            _engine.SetPluginNodeBypassed(member.Slot, bypassed);
+        }
+
+        AppendLog($"{group.Name}: {(bypassed ? "shut off / bypassed" : "turned on")} {members.Count} VST node(s).");
+        RebuildVstNodeList();
+        RebuildRoutingCanvas();
+        QueueSave();
     }
 
     private void SetGroupPinsCollapsed(PluginGroupSnapshot group, bool collapsed)
@@ -7030,7 +7170,7 @@ public partial class MainWindow : Window
     {
         var menu = new ContextMenu();
         menu.Items.Add(CreateNodeMenuItem("Open Editor", () => OpenPluginEditorWithSavedData(node)));
-        menu.Items.Add(CreateNodeMenuItem(node.Bypassed ? "Enable" : "Bypass", () => SetNodeBypass(node, !node.Bypassed)));
+        menu.Items.Add(CreateNodeMenuItem(node.Bypassed ? "Turn On" : "Shut Off / Bypass", () => SetNodeBypass(node, !node.Bypassed)));
         menu.Items.Add(new Separator());
         menu.Items.Add(CreateNodeMenuItem("Properties", () => ShowNodeProperties(node)));
         menu.Items.Add(CreateNodeMenuItem("Add Stereo Sidechain Input", () => AddStereoSidechainInput(node)));
@@ -7184,7 +7324,8 @@ public partial class MainWindow : Window
             (sourceSlot, sourcePin, destinationSlot, nativeDestinationPin) =>
                 _engine.TogglePluginModuleRoute(sourceSlot, sourcePin, destinationSlot, nativeDestinationPin),
             RemovePluginNode,
-            OpenPluginEditorWithSavedData)
+            OpenPluginEditorWithSavedData,
+            SetNodeBypass)
         {
             Owner = this
         };
@@ -10261,6 +10402,18 @@ public partial class MainWindow : Window
         LogTextBox.ScrollToEnd();
     }
 
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        if (!_isShuttingDown)
+        {
+            e.Cancel = true;
+            HideToTray();
+            return;
+        }
+
+        base.OnClosing(e);
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         FlushQueuedChannelChanges();
@@ -10271,6 +10424,7 @@ public partial class MainWindow : Window
         SaveSettings();
         _vbanTextListener?.Dispose();
         _vfxCommandsWindow?.Close();
+        DisposeTrayIcon();
         _engine.Dispose();
         base.OnClosed(e);
     }
