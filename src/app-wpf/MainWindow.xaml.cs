@@ -95,6 +95,11 @@ public partial class MainWindow : Window
     private const string ConnectionEndpointToEndpoint = "endpoint-to-endpoint";
     private const string ConnectionGroupInputToNode = "group-input-to-node";
     private const string ConnectionNodeToGroupOutput = "node-to-group-output";
+    private const string ConnectionEndpointToGroupInput = "endpoint-to-group-input";
+    private const string ConnectionGroupOutputToEndpoint = "group-output-to-endpoint";
+    private const string ConnectionNodeToGroupInput = "node-to-group-input";
+    private const string ConnectionGroupOutputToNode = "group-output-to-node";
+    private const string ConnectionGroupOutputToGroupInput = "group-output-to-group-input";
     private const int GroupSidechainPinBase = 100;
     private const double VstCanvasMinWidth = 980.0;
     private const double VstCanvasMinHeight = 920.0;
@@ -117,6 +122,14 @@ public partial class MainWindow : Window
         new("Red", "red", "#E15F5F", "#331817"),
         new("Green", "green", "#55C27A", "#14392F")
     ];
+
+    private sealed record PluginFolderListItem(string Path, bool IsDefault)
+    {
+        public override string ToString()
+        {
+            return IsDefault ? $"{Path}  (default)" : Path;
+        }
+    }
 
     private enum WorkspaceView
     {
@@ -255,6 +268,15 @@ public partial class MainWindow : Window
 
     private sealed record DirectChannelRouteInfo(int SourceChannel, int DestinationChannel, string Label);
 
+    private sealed record EffectiveGroupRoute(
+        string Kind,
+        int SourceChannel,
+        int DestinationChannel,
+        int SourceSlot,
+        int SourcePin,
+        int DestinationSlot,
+        int DestinationPin);
+
     private void InputModeButton_Click(object sender, RoutedEventArgs e) => SelectMode(CallbackMode.Input);
 
     private void OutputModeButton_Click(object sender, RoutedEventArgs e) => SelectMode(CallbackMode.Output);
@@ -345,6 +367,7 @@ public partial class MainWindow : Window
 
         _settings.PluginFormatFilter = filter;
         UpdatePluginFormatButtons();
+        PopulatePluginFolderList();
         PopulatePluginList();
         QueueSave();
     }
@@ -378,11 +401,12 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (PluginFoldersListBox.SelectedItem is not string folder)
+        if (PluginFoldersListBox.SelectedItem is not PluginFolderListItem { IsDefault: false } folderItem)
         {
             return;
         }
 
+        var folder = folderItem.Path;
         _settings.PluginScanFolders.RemoveAll(item => string.Equals(item, folder, StringComparison.OrdinalIgnoreCase));
         PopulatePluginFolderList();
         QueueSave();
@@ -391,7 +415,8 @@ public partial class MainWindow : Window
 
     private void PluginFoldersListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        RemovePluginFolderButton.IsEnabled = !PluginBrowserBusy && PluginFoldersListBox.SelectedItem is not null;
+        RemovePluginFolderButton.IsEnabled = !PluginBrowserBusy &&
+                                             PluginFoldersListBox.SelectedItem is PluginFolderListItem { IsDefault: false };
     }
 
     private async void ScanButton_Click(object sender, RoutedEventArgs e)
@@ -419,7 +444,7 @@ public partial class MainWindow : Window
         ShowPluginScanWindow();
         UpdatePluginScanProgress(writeHeartbeat: false);
         _pluginScanTimer.Start();
-        AppendLog($"Plugin scan started ({_pluginScanLabel}). This pass inventories plugin files only; plugin metadata is resolved when a VST is added.");
+        AppendLog($"Plugin scan started ({_pluginScanLabel}). This pass reads lightweight VST names only; full metadata is resolved when a VST is added.");
 
         try
         {
@@ -440,6 +465,7 @@ public partial class MainWindow : Window
             _pluginScanLabel = string.Empty;
             SetPluginScanControlsEnabled(true);
             UpdatePluginFormatButtons();
+            PopulatePluginFolderList();
             UpdateLiveStatusText();
             _pluginScanWindow?.UpdateProgress(_engine.PluginScanProgress(), elapsed, finished: true);
             AppendLog($"Plugin scan finished in {elapsed.TotalSeconds:0.0}s.");
@@ -932,11 +958,13 @@ public partial class MainWindow : Window
         }
 
         _settings.CanvasConnections.RemoveAll(connection =>
-            (connection.Kind == ConnectionGroupInputToNode &&
+            (IsGroupPinKind(connection.FromKind) &&
              !_settings.PluginGroups.Any(group => group.Id == connection.FromGroupId)) ||
-            (connection.Kind == ConnectionNodeToGroupOutput &&
+            (IsGroupPinKind(connection.ToKind) &&
              !_settings.PluginGroups.Any(group => group.Id == connection.ToGroupId)));
     }
+
+    private static bool IsGroupPinKind(string kind) => kind is PinGroupInput or PinGroupOutput;
 
     private void MigratePlainInputOutputCanvasRoutesToSharedChannelRoutes()
     {
@@ -977,10 +1005,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_settings.PluginScanFolders.Any(existing => string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase)))
+        if (PluginFolderListBoxItems().Any(existing => string.Equals(existing.Path, normalized, StringComparison.OrdinalIgnoreCase)))
         {
-            PluginFoldersListBox.SelectedItem = _settings.PluginScanFolders.First(existing =>
-                string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase));
+            SelectPluginFolder(normalized);
             AppendLog($"Plugin scan folder already listed: {normalized}");
             return;
         }
@@ -988,20 +1015,48 @@ public partial class MainWindow : Window
         _settings.PluginScanFolders.Add(normalized);
         NormalizePluginScanFolders();
         PopulatePluginFolderList();
-        PluginFoldersListBox.SelectedItem = normalized;
+        SelectPluginFolder(normalized);
         QueueSave();
         AppendLog($"Added plugin scan folder: {normalized}");
     }
 
     private void PopulatePluginFolderList()
     {
+        var selectedPath = PluginFoldersListBox.SelectedItem is PluginFolderListItem selected
+            ? selected.Path
+            : string.Empty;
+
         PluginFoldersListBox.Items.Clear();
-        foreach (var folder in _settings.PluginScanFolders)
+        var defaultFolders = _engine.DefaultPluginFolders(SanitizePluginFormatFilter(_settings.PluginFormatFilter));
+        foreach (var folder in defaultFolders)
         {
-            PluginFoldersListBox.Items.Add(folder);
+            PluginFoldersListBox.Items.Add(new PluginFolderListItem(folder, true));
         }
 
-        RemovePluginFolderButton.IsEnabled = PluginFoldersListBox.SelectedItem is not null;
+        foreach (var folder in _settings.PluginScanFolders
+                     .Where(folder => defaultFolders.All(defaultFolder =>
+                         !string.Equals(defaultFolder, folder, StringComparison.OrdinalIgnoreCase))))
+        {
+            PluginFoldersListBox.Items.Add(new PluginFolderListItem(folder, false));
+        }
+
+        if (!string.IsNullOrWhiteSpace(selectedPath))
+        {
+            SelectPluginFolder(selectedPath);
+        }
+
+        RemovePluginFolderButton.IsEnabled = PluginFoldersListBox.SelectedItem is PluginFolderListItem { IsDefault: false };
+    }
+
+    private IEnumerable<PluginFolderListItem> PluginFolderListBoxItems()
+    {
+        return PluginFoldersListBox.Items.OfType<PluginFolderListItem>();
+    }
+
+    private void SelectPluginFolder(string path)
+    {
+        PluginFoldersListBox.SelectedItem = PluginFolderListBoxItems()
+            .FirstOrDefault(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase));
     }
 
     private void NormalizePluginScanFolders()
@@ -1960,7 +2015,10 @@ public partial class MainWindow : Window
         builder.AppendLine($"VST canvas passthrough routes: {pluginPassthroughRoutes.Length}");
         foreach (var route in pluginPassthroughRoutes)
         {
-            builder.AppendLine($"  {route.Mode}: src {route.SourceChannel + 1} -> dst {route.DestinationChannel + 1}");
+            var destinationLabel = route.DestinationChannel >= 0
+                ? $"dst {route.DestinationChannel + 1}"
+                : "sink";
+            builder.AppendLine($"  {route.Mode}: src {route.SourceChannel + 1} -> {destinationLabel}, name={route.Name}");
         }
 
         return builder.ToString();
@@ -2093,7 +2151,7 @@ public partial class MainWindow : Window
         PluginSearchTextBox.Cursor = enabled ? Cursors.IBeam : Cursors.AppStarting;
         PluginFoldersListBox.IsEnabled = true;
         PluginFoldersListBox.Cursor = enabled ? Cursors.Arrow : Cursors.AppStarting;
-        RemovePluginFolderButton.IsEnabled = enabled && PluginFoldersListBox.SelectedItem is not null;
+        RemovePluginFolderButton.IsEnabled = enabled && PluginFoldersListBox.SelectedItem is PluginFolderListItem { IsDefault: false };
         PluginListBox.IsEnabled = true;
         PluginListBox.IsHitTestVisible = true;
         PluginListBox.Cursor = enabled ? Cursors.Arrow : Cursors.AppStarting;
@@ -2146,6 +2204,12 @@ public partial class MainWindow : Window
         foreach (var connection in _settings.CanvasConnections.Where(static connection => connection.Kind == ConnectionEndpointToEndpoint))
         {
             active |= EndpointToEndpointRouteMode(connection.FromMode, connection.ToMode);
+        }
+
+        foreach (var connection in _settings.CanvasConnections.Where(IsExternalGroupConnection))
+        {
+            active |= connection.FromMode;
+            active |= connection.ToMode;
         }
 
         var directRoutes = AllDirectRoutes().ToArray();
@@ -2407,6 +2471,14 @@ public partial class MainWindow : Window
                              pinInfo.Node is not null &&
                              connection.FromSlot == pinInfo.Node.Slot &&
                              connection.FromPin == pinInfo.Pin,
+            PinGroupInput => connection.ToKind == PinGroupInput &&
+                             pinInfo.Group is not null &&
+                             connection.ToGroupId == pinInfo.Group.Id &&
+                             connection.ToPin == pinInfo.Pin,
+            PinGroupOutput => connection.FromKind == PinGroupOutput &&
+                              pinInfo.Group is not null &&
+                              connection.FromGroupId == pinInfo.Group.Id &&
+                              connection.FromPin == pinInfo.Pin,
             _ => false
         };
     }
@@ -2421,8 +2493,18 @@ public partial class MainWindow : Window
             ConnectionNodeToNode => $"node output {connection.FromPin + 1} -> node input {connection.ToPin + 1}",
             ConnectionGroupInputToNode => $"group input {connection.FromPin + 1} -> node input {connection.ToPin + 1}",
             ConnectionNodeToGroupOutput => $"node output {connection.FromPin + 1} -> group output {connection.ToPin + 1}",
+            ConnectionEndpointToGroupInput => $"CH {connection.FromChannel + 1} -> {GroupNameForLabel(connection.ToGroupId)} input {connection.ToPin + 1}",
+            ConnectionGroupOutputToEndpoint => $"{GroupNameForLabel(connection.FromGroupId)} output {connection.FromPin + 1} -> CH {connection.ToChannel + 1}",
+            ConnectionNodeToGroupInput => $"node output {connection.FromPin + 1} -> {GroupNameForLabel(connection.ToGroupId)} input {connection.ToPin + 1}",
+            ConnectionGroupOutputToNode => $"{GroupNameForLabel(connection.FromGroupId)} output {connection.FromPin + 1} -> node input {connection.ToPin + 1}",
+            ConnectionGroupOutputToGroupInput => $"{GroupNameForLabel(connection.FromGroupId)} output {connection.FromPin + 1} -> {GroupNameForLabel(connection.ToGroupId)} input {connection.ToPin + 1}",
             _ => "Cable"
         };
+    }
+
+    private string GroupNameForLabel(string groupId)
+    {
+        return GroupById(groupId)?.Name ?? "Group";
     }
 
     private EndpointPinMode EndpointPinModeFor(CallbackMode mode, IoEndpoint endpoint)
@@ -5088,6 +5170,8 @@ public partial class MainWindow : Window
             }
         }
 
+        ApplyAllGroupExternalRoutes(active: true);
+
         if (oldSelectedSlot.HasValue && slotMap.TryGetValue(oldSelectedSlot.Value, out var selectedNode))
         {
             _selectedPluginNodeSlot = selectedNode.Slot;
@@ -5418,6 +5502,65 @@ public partial class MainWindow : Window
                 connection.FromSlot = groupOutputSource.Slot;
                 connection.FromMode = groupOutputSource.Mode;
                 connection.From = NodeOutputKey(groupOutputSource.Slot, connection.FromPin);
+                return AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionEndpointToGroupInput:
+                if (!_settings.PluginGroups.Any(group => group.Id == connection.ToGroupId) || connection.FromChannel < 0)
+                {
+                    return false;
+                }
+
+                connection.From = EndpointSourceKey(connection.FromMode, connection.FromChannel);
+                connection.To = GroupInputKey(connection.ToGroupId, connection.ToPin);
+                return AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionGroupOutputToEndpoint:
+                if (!_settings.PluginGroups.Any(group => group.Id == connection.FromGroupId) || connection.ToChannel < 0)
+                {
+                    return false;
+                }
+
+                connection.From = GroupOutputKey(connection.FromGroupId, connection.FromPin);
+                connection.To = EndpointDestinationKey(connection.ToMode, connection.ToChannel);
+                return AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionNodeToGroupInput:
+                if (!slotMap.TryGetValue(connection.FromSlot, out var groupInputSource) ||
+                    !_settings.PluginGroups.Any(group => group.Id == connection.ToGroupId) ||
+                    !IsValidNodeOutputPin(groupInputSource, connection.FromPin))
+                {
+                    return false;
+                }
+
+                connection.FromSlot = groupInputSource.Slot;
+                connection.FromMode = groupInputSource.Mode;
+                connection.From = NodeOutputKey(groupInputSource.Slot, connection.FromPin);
+                connection.To = GroupInputKey(connection.ToGroupId, connection.ToPin);
+                return AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionGroupOutputToNode:
+                if (!_settings.PluginGroups.Any(group => group.Id == connection.FromGroupId) ||
+                    !slotMap.TryGetValue(connection.ToSlot, out var groupOutputTarget) ||
+                    !IsValidNodeInputVisualPin(groupOutputTarget, connection.ToPin))
+                {
+                    return false;
+                }
+
+                connection.From = GroupOutputKey(connection.FromGroupId, connection.FromPin);
+                connection.ToSlot = groupOutputTarget.Slot;
+                connection.ToMode = groupOutputTarget.Mode;
+                connection.To = NodeInputKey(groupOutputTarget.Slot, connection.ToPin);
+                return AddRestoredCanvasConnection(connection, connectionKeys);
+
+            case ConnectionGroupOutputToGroupInput:
+                if (!_settings.PluginGroups.Any(group => group.Id == connection.FromGroupId) ||
+                    !_settings.PluginGroups.Any(group => group.Id == connection.ToGroupId))
+                {
+                    return false;
+                }
+
+                connection.From = GroupOutputKey(connection.FromGroupId, connection.FromPin);
+                connection.To = GroupInputKey(connection.ToGroupId, connection.ToPin);
                 return AddRestoredCanvasConnection(connection, connectionKeys);
 
             default:
@@ -5886,6 +6029,21 @@ public partial class MainWindow : Window
             ConnectionNodeToNode =>
                 _settings.PluginNodes.Any(node => node.Slot == connection.FromSlot && NodeBelongsToCurrentCanvas(node)) &&
                 _settings.PluginNodes.Any(node => node.Slot == connection.ToSlot && NodeBelongsToCurrentCanvas(node)),
+            ConnectionEndpointToGroupInput =>
+                EndpointIsVisibleOnCurrentCanvas(connection.FromMode, outputSide: false) &&
+                _settings.PluginGroups.Any(group => group.Id == connection.ToGroupId && GroupBelongsToCurrentCanvas(group)),
+            ConnectionGroupOutputToEndpoint =>
+                _settings.PluginGroups.Any(group => group.Id == connection.FromGroupId && GroupBelongsToCurrentCanvas(group)) &&
+                EndpointIsVisibleOnCurrentCanvas(connection.ToMode, outputSide: true),
+            ConnectionNodeToGroupInput =>
+                _settings.PluginNodes.Any(node => node.Slot == connection.FromSlot && NodeBelongsToCurrentCanvas(node)) &&
+                _settings.PluginGroups.Any(group => group.Id == connection.ToGroupId && GroupBelongsToCurrentCanvas(group)),
+            ConnectionGroupOutputToNode =>
+                _settings.PluginGroups.Any(group => group.Id == connection.FromGroupId && GroupBelongsToCurrentCanvas(group)) &&
+                _settings.PluginNodes.Any(node => node.Slot == connection.ToSlot && NodeBelongsToCurrentCanvas(node)),
+            ConnectionGroupOutputToGroupInput =>
+                _settings.PluginGroups.Any(group => group.Id == connection.FromGroupId && GroupBelongsToCurrentCanvas(group)) &&
+                _settings.PluginGroups.Any(group => group.Id == connection.ToGroupId && GroupBelongsToCurrentCanvas(group)),
             _ => false
         };
     }
@@ -6662,38 +6820,6 @@ public partial class MainWindow : Window
 
     private CanvasPinInfo ResolveGroupCanvasPin(PluginGroupSnapshot group, int groupPin, bool input, Point point, string pinLabel)
     {
-        if (input &&
-            FindGroupInputMapping(group, groupPin) is { } inputMapping &&
-            _settings.PluginNodes.FirstOrDefault(node => node.Slot == inputMapping.ToSlot) is { } inputNode)
-        {
-            return new CanvasPinInfo
-            {
-                Kind = PinNodeInput,
-                Mode = inputNode.Mode,
-                Node = inputNode,
-                Group = group,
-                Pin = inputMapping.ToPin,
-                Point = point,
-                Label = $"{group.Name} in {pinLabel} -> {inputNode.Name} {NodeInputPinLabel(inputNode, inputMapping.ToPin)}"
-            };
-        }
-
-        if (!input &&
-            FindGroupOutputMapping(group, groupPin) is { } outputMapping &&
-            _settings.PluginNodes.FirstOrDefault(node => node.Slot == outputMapping.FromSlot) is { } outputNode)
-        {
-            return new CanvasPinInfo
-            {
-                Kind = PinNodeOutput,
-                Mode = outputNode.Mode,
-                Node = outputNode,
-                Group = group,
-                Pin = outputMapping.FromPin,
-                Point = point,
-                Label = $"{group.Name} out {pinLabel} <- {outputNode.Name} {NodeOutputPinLabel(outputNode, outputMapping.FromPin)}"
-            };
-        }
-
         return new CanvasPinInfo
         {
             Kind = input ? PinGroupInput : PinGroupOutput,
@@ -6969,6 +7095,8 @@ public partial class MainWindow : Window
 
     private void AddNodeToGroup(PluginNodeSnapshot node, PluginGroupSnapshot group)
     {
+        var previousGroupRoutes = EffectiveGroupExternalRoutes(group).ToList();
+        var previousLastSlot = GroupMembers(group).LastOrDefault()?.Slot;
         foreach (var existingGroup in _settings.PluginGroups)
         {
             if (existingGroup.Id != group.Id)
@@ -6986,6 +7114,9 @@ public partial class MainWindow : Window
         _selectedPluginGroupId = group.Id;
         _selectedPluginNodeSlot = null;
         EnsureGroupInternalConnections(group);
+        RetargetAutoGroupOutputMappings(group, previousLastSlot);
+        EnsureGroupPortMappings(group);
+        ReconcileGroupExternalRoutes(group, previousGroupRoutes);
         AppendLog($"Added {node.Name} to {group.Name}.");
         RefreshEngineCallbackMode();
         RebuildVstNodeList();
@@ -7001,9 +7132,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        var previousGroupRoutes = EffectiveGroupExternalRoutes(group).ToList();
         PlaceUngroupedMembersNearGroup(group, [node]);
         DisconnectGroupMemberInternalConnections(group, node);
         group.MemberSlots.Remove(node.Slot);
+        EnsureGroupPortMappings(group);
+        ReconcileGroupExternalRoutes(group, previousGroupRoutes);
         AppendLog($"Removed {node.Name} from {group.Name}.");
         RefreshEngineCallbackMode();
         RebuildVstNodeList();
@@ -7042,6 +7176,7 @@ public partial class MainWindow : Window
 
     private void ShowGroupProperties(PluginGroupSnapshot group)
     {
+        var previousGroupRoutes = EffectiveGroupExternalRoutes(group).ToList();
         var editor = new PluginGroupPropertiesWindow(
             group,
             GroupMembers(group).ToList(),
@@ -7066,6 +7201,9 @@ public partial class MainWindow : Window
                 .Where(slot => _settings.PluginNodes.Any(node => node.Slot == slot))
                 .Distinct()
                 .ToList();
+            EnsureGroupInternalConnections(group);
+            EnsureGroupPortMappings(group);
+            ReconcileGroupExternalRoutes(group, previousGroupRoutes);
 
             RefreshEngineCallbackMode();
             RebuildVstNodeList();
@@ -7078,7 +7216,10 @@ public partial class MainWindow : Window
 
     private void AutoWirePluginGroup(PluginGroupSnapshot group)
     {
+        var previousGroupRoutes = EffectiveGroupExternalRoutes(group).ToList();
         EnsureGroupInternalConnections(group);
+        EnsureGroupPortMappings(group);
+        ReconcileGroupExternalRoutes(group, previousGroupRoutes);
         AppendLog($"{group.Name}: auto-wired adjacent VSTs by matching pins.");
         RefreshEngineCallbackMode();
         RebuildRoutingCanvas();
@@ -7089,6 +7230,7 @@ public partial class MainWindow : Window
     {
         var members = GroupMembers(group).ToList();
         PlaceUngroupedMembersNearGroup(group, members);
+        RemoveGroupExternalConnections(group);
         RemoveGroupPortMappings(group);
         _settings.PluginGroups.Remove(group);
         if (_selectedPluginGroupId == group.Id)
@@ -7106,6 +7248,7 @@ public partial class MainWindow : Window
     {
         var members = GroupMembers(group).ToList();
         var memberSlots = members.Select(static node => node.Slot).ToHashSet();
+        RemoveGroupExternalConnections(group);
 
         foreach (var member in members)
         {
@@ -7116,8 +7259,8 @@ public partial class MainWindow : Window
         _settings.CanvasConnections.RemoveAll(connection =>
             memberSlots.Contains(connection.FromSlot) ||
             memberSlots.Contains(connection.ToSlot) ||
-            (connection.Kind == ConnectionGroupInputToNode && connection.FromGroupId == group.Id) ||
-            (connection.Kind == ConnectionNodeToGroupOutput && connection.ToGroupId == group.Id));
+            (IsGroupPinKind(connection.FromKind) && connection.FromGroupId == group.Id) ||
+            (IsGroupPinKind(connection.ToKind) && connection.ToGroupId == group.Id));
         _settings.PluginNodes.RemoveAll(node => memberSlots.Contains(node.Slot));
         foreach (var existingGroup in _settings.PluginGroups)
         {
@@ -7184,6 +7327,17 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RemoveGroupExternalConnections(PluginGroupSnapshot group)
+    {
+        foreach (var connection in _settings.CanvasConnections
+                     .Where(connection => IsExternalGroupConnection(connection) &&
+                                          (connection.FromGroupId == group.Id || connection.ToGroupId == group.Id))
+                     .ToList())
+        {
+            SetGroupEdgeConnectionActive(connection, active: false);
+            _settings.CanvasConnections.Remove(connection);
+        }
+    }
     private void RemoveGroupPortMappings(PluginGroupSnapshot group)
     {
         _settings.CanvasConnections.RemoveAll(connection =>
@@ -7391,6 +7545,112 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RetargetAutoGroupOutputMappings(PluginGroupSnapshot group, int? previousLastSlot)
+    {
+        if (!previousLastSlot.HasValue)
+        {
+            return;
+        }
+
+        var newLast = GroupMembers(group).LastOrDefault();
+        if (newLast is null || newLast.Slot == previousLastSlot.Value)
+        {
+            return;
+        }
+
+        foreach (var connection in _settings.CanvasConnections.Where(connection =>
+                     connection.Kind == ConnectionNodeToGroupOutput &&
+                     connection.ToGroupId == group.Id &&
+                     connection.FromSlot == previousLastSlot.Value &&
+                     connection.FromPin == connection.ToPin &&
+                     connection.FromPin >= 0 &&
+                     connection.FromPin < newLast.OutputPins))
+        {
+            connection.FromSlot = newLast.Slot;
+            connection.FromMode = newLast.Mode;
+            connection.From = NodeOutputKey(newLast.Slot, connection.FromPin);
+        }
+    }
+    private void EnsureGroupPortMappings(PluginGroupSnapshot group)
+    {
+        var members = GroupMembers(group).ToList();
+        if (members.Count == 0)
+        {
+            return;
+        }
+
+        var memberSlots = members.Select(static node => node.Slot).ToHashSet();
+        var validInputPins = GroupInputPinIds(group).ToHashSet();
+        var validOutputPins = GroupOutputPinIds(group).ToHashSet();
+        _settings.CanvasConnections.RemoveAll(connection =>
+            connection.Kind == ConnectionGroupInputToNode &&
+            connection.FromGroupId == group.Id &&
+            (!validInputPins.Contains(connection.FromPin) ||
+             !memberSlots.Contains(connection.ToSlot) ||
+             _settings.PluginNodes.FirstOrDefault(node => node.Slot == connection.ToSlot) is not { } targetNode ||
+             !IsValidNodeInputVisualPin(targetNode, connection.ToPin)) ||
+            connection.Kind == ConnectionNodeToGroupOutput &&
+            connection.ToGroupId == group.Id &&
+            (!validOutputPins.Contains(connection.ToPin) ||
+             !memberSlots.Contains(connection.FromSlot) ||
+             _settings.PluginNodes.FirstOrDefault(node => node.Slot == connection.FromSlot) is not { } sourceNode ||
+             !IsValidNodeOutputPin(sourceNode, connection.FromPin)));
+
+        var first = members.First();
+        var last = members.Last();
+        foreach (var pin in Enumerable.Range(0, Math.Min(group.InputPins, first.MainInputPins)))
+        {
+            if (FindGroupInputMapping(group, pin) is not null)
+            {
+                continue;
+            }
+
+            var visualPin = first.SidechainInputPins + pin;
+            if (!IsValidNodeInputVisualPin(first, visualPin))
+            {
+                continue;
+            }
+
+            _settings.CanvasConnections.Add(new CanvasConnectionSnapshot
+            {
+                Kind = ConnectionGroupInputToNode,
+                FromKind = PinGroupInput,
+                FromGroupId = group.Id,
+                FromMode = group.Mode,
+                FromPin = pin,
+                ToKind = PinNodeInput,
+                ToMode = first.Mode,
+                ToSlot = first.Slot,
+                ToPin = visualPin,
+                From = GroupInputKey(group.Id, pin),
+                To = NodeInputKey(first.Slot, visualPin)
+            });
+        }
+
+        foreach (var pin in Enumerable.Range(0, Math.Min(group.OutputPins, last.OutputPins)))
+        {
+            if (FindGroupOutputMapping(group, pin) is not null)
+            {
+                continue;
+            }
+
+            _settings.CanvasConnections.Add(new CanvasConnectionSnapshot
+            {
+                Kind = ConnectionNodeToGroupOutput,
+                FromKind = PinNodeOutput,
+                FromMode = last.Mode,
+                FromSlot = last.Slot,
+                FromPin = pin,
+                ToKind = PinGroupOutput,
+                ToGroupId = group.Id,
+                ToMode = group.Mode,
+                ToPin = pin,
+                From = NodeOutputKey(last.Slot, pin),
+                To = GroupOutputKey(group.Id, pin)
+            });
+        }
+    }
+
     private string NodePinSummary(PluginNodeSnapshot node)
     {
         return node.SidechainInputPins > 0
@@ -7496,6 +7756,7 @@ public partial class MainWindow : Window
             oldSidechainInputPins,
             oldOutputPins,
             oldConnections);
+        ApplyAllGroupExternalRoutes(active: true);
         AppendLog($"{node.Name}: pin layout set to {NodePinSummary(node)}. Restored {restored} cable(s).");
         RefreshEngineCallbackMode();
         RebuildVstNodeList();
@@ -7637,6 +7898,35 @@ public partial class MainWindow : Window
                 migrated.FromSlot = node.Slot;
                 migrated.FromMode = node.Mode;
                 migrated.From = NodeOutputKey(node.Slot, migrated.FromPin);
+            }
+            else if (migrated.Kind == ConnectionNodeToGroupInput && migrated.FromSlot == oldSlot)
+            {
+                if (migrated.FromPin < 0 || migrated.FromPin >= node.OutputPins || migrated.FromPin >= oldOutputPins)
+                {
+                    continue;
+                }
+
+                migrated.FromSlot = node.Slot;
+                migrated.FromMode = node.Mode;
+                migrated.From = NodeOutputKey(node.Slot, migrated.FromPin);
+            }
+            else if (migrated.Kind == ConnectionGroupOutputToNode && migrated.ToSlot == oldSlot)
+            {
+                var newVisualPin = RemapInputVisualPin(
+                    migrated.ToPin,
+                    oldMainInputPins,
+                    oldSidechainInputPins,
+                    node.MainInputPins,
+                    node.SidechainInputPins);
+                if (newVisualPin < 0)
+                {
+                    continue;
+                }
+
+                migrated.ToSlot = node.Slot;
+                migrated.ToPin = newVisualPin;
+                migrated.ToMode = node.Mode;
+                migrated.To = NodeInputKey(node.Slot, newVisualPin);
             }
             else
             {
@@ -7987,11 +8277,22 @@ public partial class MainWindow : Window
 
     private static bool CanStartWire(CanvasPinInfo pin)
     {
-        return pin.Kind is PinEndpointSource or PinNodeOutput;
+        return pin.Kind is PinEndpointSource or PinNodeOutput or PinGroupOutput;
     }
 
     private static bool CanCompleteWire(CanvasPinInfo from, CanvasPinInfo to)
     {
+        if (to.Kind == PinGroupInput)
+        {
+            return from.Kind is PinEndpointSource or PinNodeOutput or PinGroupOutput &&
+                   (from.Group is null || to.Group is null || from.Group.Id != to.Group.Id);
+        }
+
+        if (from.Kind == PinGroupOutput)
+        {
+            return to.Kind is PinEndpointDestination or PinNodeInput;
+        }
+
         if (from.Kind == PinEndpointSource && to.Kind == PinNodeInput)
         {
             return true;
@@ -8055,6 +8356,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (((source.Kind is PinEndpointSource or PinNodeOutput or PinGroupOutput) && target.Kind == PinGroupInput) ||
+            (source.Kind == PinGroupOutput && target.Kind is PinEndpointDestination or PinNodeInput))
+        {
+            ToggleGroupEdgeConnection(source, target);
+            return;
+        }
+
         if (source.Kind == PinNodeOutput && target.Kind == PinEndpointDestination)
         {
             var existing = source.Node is null
@@ -8073,6 +8381,322 @@ public partial class MainWindow : Window
         ToggleNodeToNodeConnection(source, target);
     }
 
+    private void ToggleGroupEdgeConnection(CanvasPinInfo source, CanvasPinInfo target)
+    {
+        var connection = CreateGroupEdgeConnection(source, target);
+        if (connection is null)
+        {
+            AppendLog("Group cables must connect a channel or VST output to a group input, or a group output to a channel or VST input.");
+            return;
+        }
+
+        var existing = FindGroupEdgeConnection(connection);
+        if (existing is null)
+        {
+            _settings.CanvasConnections.Add(connection);
+            SetGroupEdgeConnectionActive(connection, active: true);
+            AppendLog($"Connected {CanvasConnectionLabel(connection)}.");
+        }
+        else
+        {
+            SetGroupEdgeConnectionActive(existing, active: false);
+            _settings.CanvasConnections.Remove(existing);
+            AppendLog($"Disconnected {CanvasConnectionLabel(existing)}.");
+        }
+
+        RefreshEngineCallbackMode();
+        RebuildRoutingCanvas();
+        QueueSave();
+    }
+
+    private CanvasConnectionSnapshot? CreateGroupEdgeConnection(CanvasPinInfo source, CanvasPinInfo target)
+    {
+        if (source.Kind == PinEndpointSource && target.Kind == PinGroupInput && target.Group is not null)
+        {
+            return new CanvasConnectionSnapshot
+            {
+                Kind = ConnectionEndpointToGroupInput,
+                FromKind = PinEndpointSource,
+                FromMode = source.Mode,
+                FromChannel = source.Channel,
+                FromPin = source.Pin,
+                ToKind = PinGroupInput,
+                ToGroupId = target.Group.Id,
+                ToMode = target.Group.Mode,
+                ToPin = target.Pin,
+                From = EndpointSourceKey(source.Mode, source.Channel),
+                To = GroupInputKey(target.Group.Id, target.Pin)
+            };
+        }
+
+        if (source.Kind == PinNodeOutput && source.Node is not null && target.Kind == PinGroupInput && target.Group is not null)
+        {
+            return new CanvasConnectionSnapshot
+            {
+                Kind = ConnectionNodeToGroupInput,
+                FromKind = PinNodeOutput,
+                FromMode = source.Node.Mode,
+                FromSlot = source.Node.Slot,
+                FromPin = source.Pin,
+                ToKind = PinGroupInput,
+                ToGroupId = target.Group.Id,
+                ToMode = target.Group.Mode,
+                ToPin = target.Pin,
+                From = NodeOutputKey(source.Node.Slot, source.Pin),
+                To = GroupInputKey(target.Group.Id, target.Pin)
+            };
+        }
+
+        if (source.Kind == PinGroupOutput && source.Group is not null && target.Kind == PinEndpointDestination)
+        {
+            return new CanvasConnectionSnapshot
+            {
+                Kind = ConnectionGroupOutputToEndpoint,
+                FromKind = PinGroupOutput,
+                FromGroupId = source.Group.Id,
+                FromMode = source.Group.Mode,
+                FromPin = source.Pin,
+                ToKind = PinEndpointDestination,
+                ToMode = target.Mode,
+                ToChannel = target.Channel,
+                ToPin = target.Pin,
+                From = GroupOutputKey(source.Group.Id, source.Pin),
+                To = EndpointDestinationKey(target.Mode, target.Channel)
+            };
+        }
+
+        if (source.Kind == PinGroupOutput && source.Group is not null && target.Kind == PinNodeInput && target.Node is not null)
+        {
+            return new CanvasConnectionSnapshot
+            {
+                Kind = ConnectionGroupOutputToNode,
+                FromKind = PinGroupOutput,
+                FromGroupId = source.Group.Id,
+                FromMode = source.Group.Mode,
+                FromPin = source.Pin,
+                ToKind = PinNodeInput,
+                ToMode = target.Node.Mode,
+                ToSlot = target.Node.Slot,
+                ToPin = target.Pin,
+                From = GroupOutputKey(source.Group.Id, source.Pin),
+                To = NodeInputKey(target.Node.Slot, target.Pin)
+            };
+        }
+
+        if (source.Kind == PinGroupOutput && source.Group is not null && target.Kind == PinGroupInput && target.Group is not null && source.Group.Id != target.Group.Id)
+        {
+            return new CanvasConnectionSnapshot
+            {
+                Kind = ConnectionGroupOutputToGroupInput,
+                FromKind = PinGroupOutput,
+                FromGroupId = source.Group.Id,
+                FromMode = source.Group.Mode,
+                FromPin = source.Pin,
+                ToKind = PinGroupInput,
+                ToGroupId = target.Group.Id,
+                ToMode = target.Group.Mode,
+                ToPin = target.Pin,
+                From = GroupOutputKey(source.Group.Id, source.Pin),
+                To = GroupInputKey(target.Group.Id, target.Pin)
+            };
+        }
+
+        return null;
+    }
+
+    private CanvasConnectionSnapshot? FindGroupEdgeConnection(CanvasConnectionSnapshot connection)
+    {
+        var key = CanvasConnectionKey(connection);
+        return _settings.CanvasConnections.FirstOrDefault(candidate => CanvasConnectionKey(candidate) == key);
+    }
+
+    private void SetGroupEdgeConnectionActive(CanvasConnectionSnapshot connection, bool active)
+    {
+        foreach (var route in EffectiveGroupRoutesForConnection(connection))
+        {
+            SetEffectiveGroupRouteActive(route, active);
+        }
+    }
+
+    private void ReconcileGroupExternalRoutes(PluginGroupSnapshot group, IReadOnlyCollection<EffectiveGroupRoute> previousRoutes)
+    {
+        var previous = previousRoutes.ToHashSet();
+        var current = EffectiveGroupExternalRoutes(group).ToHashSet();
+
+        foreach (var route in previous.Except(current))
+        {
+            SetEffectiveGroupRouteActive(route, active: false);
+        }
+
+        foreach (var route in current.Except(previous))
+        {
+            SetEffectiveGroupRouteActive(route, active: true);
+        }
+    }
+
+    private void ApplyAllGroupExternalRoutes(bool active)
+    {
+        foreach (var route in _settings.CanvasConnections
+                     .Where(IsExternalGroupConnection)
+                     .SelectMany(EffectiveGroupRoutesForConnection)
+                     .Distinct())
+        {
+            SetEffectiveGroupRouteActive(route, active);
+        }
+    }
+
+    private IEnumerable<EffectiveGroupRoute> EffectiveGroupExternalRoutes(PluginGroupSnapshot group)
+    {
+        return _settings.CanvasConnections
+            .Where(connection => IsExternalGroupConnection(connection) &&
+                                 (connection.FromGroupId == group.Id || connection.ToGroupId == group.Id))
+            .SelectMany(EffectiveGroupRoutesForConnection);
+    }
+
+    private static bool IsExternalGroupConnection(CanvasConnectionSnapshot connection)
+    {
+        return connection.Kind is ConnectionEndpointToGroupInput
+            or ConnectionGroupOutputToEndpoint
+            or ConnectionNodeToGroupInput
+            or ConnectionGroupOutputToNode
+            or ConnectionGroupOutputToGroupInput;
+    }
+
+    private IEnumerable<EffectiveGroupRoute> EffectiveGroupRoutesForConnection(CanvasConnectionSnapshot connection)
+    {
+        switch (connection.Kind)
+        {
+            case ConnectionEndpointToGroupInput:
+                if (GroupById(connection.ToGroupId) is { } inputGroup &&
+                    FindGroupInputMapping(inputGroup, connection.ToPin) is { } inputMapping &&
+                    _settings.PluginNodes.Any(node => node.Slot == inputMapping.ToSlot) &&
+                    connection.FromChannel >= 0)
+                {
+                    yield return new EffectiveGroupRoute("input", connection.FromChannel, -1, -1, -1, inputMapping.ToSlot, inputMapping.ToPin);
+                }
+                break;
+
+            case ConnectionGroupOutputToEndpoint:
+                if (GroupById(connection.FromGroupId) is { } outputGroup &&
+                    FindGroupOutputMapping(outputGroup, connection.FromPin) is { } outputMapping &&
+                    _settings.PluginNodes.Any(node => node.Slot == outputMapping.FromSlot) &&
+                    connection.ToChannel >= 0)
+                {
+                    yield return new EffectiveGroupRoute("output", -1, connection.ToChannel, outputMapping.FromSlot, outputMapping.FromPin, -1, -1);
+                }
+                break;
+
+            case ConnectionNodeToGroupInput:
+                if (GroupById(connection.ToGroupId) is { } nodeInputGroup &&
+                    FindGroupInputMapping(nodeInputGroup, connection.ToPin) is { } nodeInputMapping &&
+                    _settings.PluginNodes.Any(node => node.Slot == connection.FromSlot) &&
+                    _settings.PluginNodes.Any(node => node.Slot == nodeInputMapping.ToSlot))
+                {
+                    yield return new EffectiveGroupRoute("module", -1, -1, connection.FromSlot, connection.FromPin, nodeInputMapping.ToSlot, nodeInputMapping.ToPin);
+                }
+                break;
+
+            case ConnectionGroupOutputToNode:
+                if (GroupById(connection.FromGroupId) is { } nodeOutputGroup &&
+                    FindGroupOutputMapping(nodeOutputGroup, connection.FromPin) is { } nodeOutputMapping &&
+                    _settings.PluginNodes.Any(node => node.Slot == nodeOutputMapping.FromSlot) &&
+                    _settings.PluginNodes.Any(node => node.Slot == connection.ToSlot))
+                {
+                    yield return new EffectiveGroupRoute("module", -1, -1, nodeOutputMapping.FromSlot, nodeOutputMapping.FromPin, connection.ToSlot, connection.ToPin);
+                }
+                break;
+
+            case ConnectionGroupOutputToGroupInput:
+                if (GroupById(connection.FromGroupId) is { } sourceGroup &&
+                    GroupById(connection.ToGroupId) is { } targetGroup &&
+                    FindGroupOutputMapping(sourceGroup, connection.FromPin) is { } sourceMapping &&
+                    FindGroupInputMapping(targetGroup, connection.ToPin) is { } targetMapping &&
+                    _settings.PluginNodes.Any(node => node.Slot == sourceMapping.FromSlot) &&
+                    _settings.PluginNodes.Any(node => node.Slot == targetMapping.ToSlot))
+                {
+                    yield return new EffectiveGroupRoute("module", -1, -1, sourceMapping.FromSlot, sourceMapping.FromPin, targetMapping.ToSlot, targetMapping.ToPin);
+                }
+                break;
+        }
+    }
+
+    private PluginGroupSnapshot? GroupById(string id)
+    {
+        return string.IsNullOrWhiteSpace(id)
+            ? null
+            : _settings.PluginGroups.FirstOrDefault(group => group.Id == id);
+    }
+
+    private void SetEffectiveGroupRouteActive(EffectiveGroupRoute route, bool active)
+    {
+        switch (route.Kind)
+        {
+            case "input":
+                SetPluginInputRouteActive(route.DestinationSlot, route.SourceChannel, route.DestinationPin, active);
+                break;
+            case "output":
+                SetPluginOutputRouteActive(route.SourceSlot, route.SourcePin, route.DestinationChannel, active);
+                break;
+            case "module":
+                SetPluginModuleRouteActive(route.SourceSlot, route.SourcePin, route.DestinationSlot, route.DestinationPin, active);
+                break;
+        }
+    }
+
+    private void SetPluginInputRouteActive(int slot, int sourceChannel, int visualPin, bool active)
+    {
+        if (_settings.PluginNodes.FirstOrDefault(node => node.Slot == slot) is not { } node)
+        {
+            return;
+        }
+
+        var nativePin = NativeInputPinForVisualPin(node, visualPin);
+        if (nativePin < 0)
+        {
+            return;
+        }
+
+        var result = _engine.TogglePluginInputRoute(slot, sourceChannel, nativePin);
+        if (result != active)
+        {
+            _engine.TogglePluginInputRoute(slot, sourceChannel, nativePin);
+        }
+    }
+
+    private void SetPluginOutputRouteActive(int slot, int outputPin, int destinationChannel, bool active)
+    {
+        if (_settings.PluginNodes.All(node => node.Slot != slot) || outputPin < 0 || destinationChannel < 0)
+        {
+            return;
+        }
+
+        var result = _engine.TogglePluginOutputRoute(slot, outputPin, destinationChannel);
+        if (result != active)
+        {
+            _engine.TogglePluginOutputRoute(slot, outputPin, destinationChannel);
+        }
+    }
+
+    private void SetPluginModuleRouteActive(int sourceSlot, int sourcePin, int destinationSlot, int destinationVisualPin, bool active)
+    {
+        if (_settings.PluginNodes.All(node => node.Slot != sourceSlot) ||
+            _settings.PluginNodes.FirstOrDefault(node => node.Slot == destinationSlot) is not { } destinationNode)
+        {
+            return;
+        }
+
+        var nativePin = NativeInputPinForVisualPin(destinationNode, destinationVisualPin);
+        if (nativePin < 0)
+        {
+            return;
+        }
+
+        var result = _engine.TogglePluginModuleRoute(sourceSlot, sourcePin, destinationSlot, nativePin);
+        if (result != active)
+        {
+            _engine.TogglePluginModuleRoute(sourceSlot, sourcePin, destinationSlot, nativePin);
+        }
+    }
     private void ToggleEndpointToEndpointConnection(CanvasPinInfo source, CanvasPinInfo target)
     {
         if (IsInputDirectOutputVstView() &&
@@ -8386,6 +9010,19 @@ public partial class MainWindow : Window
                     return hueKey;
                 }
             }
+            else if (connection.Kind == ConnectionGroupOutputToNode && connection.ToSlot == slot)
+            {
+                if (targetNode is not null && IsSidechainVisualInputPin(targetNode, connection.ToPin))
+                {
+                    continue;
+                }
+
+                var hueKey = GroupOutputHueKey(connection.FromGroupId, connection.FromPin);
+                if (!string.IsNullOrEmpty(hueKey))
+                {
+                    return hueKey;
+                }
+            }
         }
 
         return null;
@@ -8429,11 +9066,29 @@ public partial class MainWindow : Window
 
                 keys.UnionWith(SourceEndpointKeysForNode(connection.FromSlot, visitedSlots));
             }
+            else if (connection.Kind == ConnectionGroupOutputToNode && connection.ToSlot == slot)
+            {
+                if (targetNode is not null && IsSidechainVisualInputPin(targetNode, connection.ToPin))
+                {
+                    continue;
+                }
+
+                keys.UnionWith(SourceEndpointKeysForGroupOutput(connection.FromGroupId, connection.FromPin, visitedSlots));
+            }
         }
 
         return keys;
     }
 
+    private HashSet<string> SourceEndpointKeysForGroupOutput(string groupId, int groupPin, HashSet<int> visitedSlots)
+    {
+        if (GroupById(groupId) is not { } group || FindGroupOutputMapping(group, groupPin) is not { } mapping)
+        {
+            return [];
+        }
+
+        return SourceEndpointKeysForNode(mapping.FromSlot, visitedSlots);
+    }
     private HashSet<(CallbackMode Mode, int Channel)> SourceChannelsForNode(int slot, HashSet<int> visitedSlots)
     {
         if (!visitedSlots.Add(slot))
@@ -8466,34 +9121,64 @@ public partial class MainWindow : Window
 
                 channels.UnionWith(SourceChannelsForNode(connection.FromSlot, visitedSlots));
             }
+            else if (connection.Kind == ConnectionGroupOutputToNode && connection.ToSlot == slot)
+            {
+                if (targetNode is not null && IsSidechainVisualInputPin(targetNode, connection.ToPin))
+                {
+                    continue;
+                }
+
+                channels.UnionWith(SourceChannelsForGroupOutput(connection.FromGroupId, connection.FromPin, visitedSlots));
+            }
         }
 
         return channels;
     }
 
+    private HashSet<(CallbackMode Mode, int Channel)> SourceChannelsForGroupOutput(string groupId, int groupPin, HashSet<int> visitedSlots)
+    {
+        if (GroupById(groupId) is not { } group || FindGroupOutputMapping(group, groupPin) is not { } mapping)
+        {
+            return [];
+        }
+
+        return SourceChannelsForNode(mapping.FromSlot, visitedSlots);
+    }
     private IEnumerable<VstGraphChannelRoute> AllVstGraphChannelRoutes()
     {
         var seen = new HashSet<string>();
         foreach (var connection in _settings.CanvasConnections)
         {
-            if (connection.Kind != ConnectionNodeToEndpoint ||
-                connection.ToMode != CallbackMode.Output ||
-                connection.ToChannel < 0)
+            IEnumerable<(CallbackMode Mode, int Channel)> sources;
+            var destinationChannel = connection.ToChannel;
+            if (connection.Kind == ConnectionNodeToEndpoint &&
+                connection.ToMode == CallbackMode.Output &&
+                connection.ToChannel >= 0)
+            {
+                sources = SourceChannelsForNode(connection.FromSlot, []);
+            }
+            else if (connection.Kind == ConnectionGroupOutputToEndpoint &&
+                     connection.ToMode == CallbackMode.Output &&
+                     connection.ToChannel >= 0)
+            {
+                sources = SourceChannelsForGroupOutput(connection.FromGroupId, connection.FromPin, []);
+            }
+            else
             {
                 continue;
             }
 
-            foreach (var source in SourceChannelsForNode(connection.FromSlot, []))
+            foreach (var source in sources)
             {
                 if (source.Mode != CallbackMode.Input || source.Channel < 0)
                 {
                     continue;
                 }
 
-                var key = $"{source.Channel}|{connection.ToChannel}";
+                var key = $"{source.Channel}|{destinationChannel}";
                 if (seen.Add(key))
                 {
-                    yield return new VstGraphChannelRoute(source.Channel, connection.ToChannel);
+                    yield return new VstGraphChannelRoute(source.Channel, destinationChannel);
                 }
             }
         }
@@ -8612,6 +9297,13 @@ public partial class MainWindow : Window
                 return node is null || !IsSidechainVisualInputPin(node, connection.ToPin);
             }
 
+            if (connection.Kind == ConnectionEndpointToGroupInput &&
+                connection.FromMode == mode &&
+                IsSameStereoPair(connection.FromChannel, channel))
+            {
+                return true;
+            }
+
             if (connection.Kind == ConnectionEndpointToEndpoint &&
                 connection.FromMode == mode &&
                 connection.ToMode == mode)
@@ -8620,7 +9312,7 @@ public partial class MainWindow : Window
                        IsSameStereoPair(connection.ToChannel, channel);
             }
 
-            return connection.Kind == ConnectionNodeToEndpoint &&
+            return (connection.Kind == ConnectionNodeToEndpoint || connection.Kind == ConnectionGroupOutputToEndpoint) &&
                    connection.ToMode == mode &&
                    IsSameStereoPair(connection.ToChannel, channel);
         });
@@ -8727,9 +9419,21 @@ public partial class MainWindow : Window
         {
             ConnectionEndpointToEndpoint => EndpointRouteHueKey(connection.FromMode, connection.FromChannel),
             ConnectionEndpointToNode => EndpointRouteHueKey(connection.FromMode, connection.FromChannel),
-            ConnectionNodeToEndpoint or ConnectionNodeToNode => SourceHueKeyForNode(connection.FromSlot, []),
+            ConnectionEndpointToGroupInput => EndpointRouteHueKey(connection.FromMode, connection.FromChannel),
+            ConnectionNodeToEndpoint or ConnectionNodeToNode or ConnectionNodeToGroupInput => SourceHueKeyForNode(connection.FromSlot, []),
+            ConnectionGroupOutputToEndpoint or ConnectionGroupOutputToNode or ConnectionGroupOutputToGroupInput => GroupOutputHueKey(connection.FromGroupId, connection.FromPin),
             _ => null
         };
+    }
+
+    private string? GroupOutputHueKey(string groupId, int groupPin)
+    {
+        if (GroupById(groupId) is not { } group || FindGroupOutputMapping(group, groupPin) is not { } mapping)
+        {
+            return null;
+        }
+
+        return SourceHueKeyForNode(mapping.FromSlot, []);
     }
 
     private string? PinHueKey(CanvasPinInfo pin)
@@ -8738,6 +9442,7 @@ public partial class MainWindow : Window
         {
             PinEndpointSource => EndpointRouteHueKey(pin.Mode, pin.Channel),
             PinNodeOutput when pin.Node is not null => SourceHueKeyForNode(pin.Node.Slot, []),
+            PinGroupOutput when pin.Group is not null => GroupOutputHueKey(pin.Group.Id, pin.Pin),
             _ => null
         };
     }
@@ -8752,6 +9457,9 @@ public partial class MainWindow : Window
             ConnectionEndpointToEndpoint => EndpointSourceKey(connection.FromMode, connection.FromChannel),
             ConnectionEndpointToNode => EndpointSourceKey(connection.FromMode, connection.FromChannel),
             ConnectionNodeToEndpoint or ConnectionNodeToNode => NodeOutputKey(connection.FromSlot, connection.FromPin),
+            ConnectionEndpointToGroupInput => EndpointSourceKey(connection.FromMode, connection.FromChannel),
+            ConnectionNodeToGroupInput => NodeOutputKey(connection.FromSlot, connection.FromPin),
+            ConnectionGroupOutputToEndpoint or ConnectionGroupOutputToNode or ConnectionGroupOutputToGroupInput => GroupOutputKey(connection.FromGroupId, connection.FromPin),
             _ => connection.From
         };
         var toKey = connection.Kind switch
@@ -8759,6 +9467,9 @@ public partial class MainWindow : Window
             ConnectionEndpointToEndpoint => EndpointDestinationKey(connection.ToMode, connection.ToChannel),
             ConnectionEndpointToNode or ConnectionNodeToNode => NodeInputKey(connection.ToSlot, connection.ToPin),
             ConnectionNodeToEndpoint => EndpointDestinationKey(connection.ToMode, connection.ToChannel),
+            ConnectionEndpointToGroupInput or ConnectionNodeToGroupInput or ConnectionGroupOutputToGroupInput => GroupInputKey(connection.ToGroupId, connection.ToPin),
+            ConnectionGroupOutputToEndpoint => EndpointDestinationKey(connection.ToMode, connection.ToChannel),
+            ConnectionGroupOutputToNode => NodeInputKey(connection.ToSlot, connection.ToPin),
             _ => connection.To
         };
 
@@ -8998,6 +9709,13 @@ public partial class MainWindow : Window
                 }
             }
             break;
+        case ConnectionEndpointToGroupInput:
+        case ConnectionGroupOutputToEndpoint:
+        case ConnectionNodeToGroupInput:
+        case ConnectionGroupOutputToNode:
+        case ConnectionGroupOutputToGroupInput:
+            SetGroupEdgeConnectionActive(connection, active: false);
+            break;
         }
 
         var removed = _settings.CanvasConnections.Remove(connection);
@@ -9089,33 +9807,77 @@ public partial class MainWindow : Window
     {
         foreach (var connection in _settings.CanvasConnections)
         {
-            if (connection.Kind != ConnectionEndpointToEndpoint)
+            switch (connection.Kind)
             {
-                continue;
-            }
+                case ConnectionEndpointToEndpoint:
+                {
+                    var mode = EndpointToEndpointRouteMode(connection.FromMode, connection.ToMode);
+                    if (mode == CallbackMode.None)
+                    {
+                        continue;
+                    }
 
-            var mode = EndpointToEndpointRouteMode(connection.FromMode, connection.ToMode);
-            if (mode == CallbackMode.None)
-            {
-                continue;
-            }
+                    if (connection.FromChannel < 0 || connection.ToChannel < 0)
+                    {
+                        continue;
+                    }
 
-            if (connection.FromChannel < 0 || connection.ToChannel < 0)
-            {
-                continue;
-            }
+                    if (IsInputPatchBypassChannel(connection.FromMode, connection.FromChannel, out _) ||
+                        IsInputPatchBypassChannel(connection.ToMode, connection.ToChannel, out _))
+                    {
+                        continue;
+                    }
 
-            if (IsInputPatchBypassChannel(connection.FromMode, connection.FromChannel, out _) ||
-                IsInputPatchBypassChannel(connection.ToMode, connection.ToChannel, out _))
-            {
-                continue;
-            }
+                    yield return new PluginPassthroughRouteSummary(
+                        mode,
+                        connection.FromChannel,
+                        connection.ToChannel,
+                        $"{connection.FromChannel + 1} -> {connection.ToChannel + 1}");
+                    break;
+                }
 
-            yield return new PluginPassthroughRouteSummary(
-                mode,
-                connection.FromChannel,
-                connection.ToChannel,
-                $"{connection.FromChannel + 1} -> {connection.ToChannel + 1}");
+                case ConnectionEndpointToGroupInput:
+                {
+                    var mode = connection.ToMode != CallbackMode.None ? connection.ToMode : connection.FromMode;
+                    if (mode == CallbackMode.None || connection.FromChannel < 0)
+                    {
+                        continue;
+                    }
+
+                    if (IsInputPatchBypassChannel(connection.FromMode, connection.FromChannel, out _))
+                    {
+                        continue;
+                    }
+
+                    yield return new PluginPassthroughRouteSummary(
+                        mode,
+                        connection.FromChannel,
+                        -1,
+                        $"{CanvasConnectionLabel(connection)} claim");
+                    break;
+                }
+
+                case ConnectionGroupOutputToEndpoint:
+                {
+                    var mode = connection.FromMode != CallbackMode.None ? connection.FromMode : connection.ToMode;
+                    if (mode == CallbackMode.None || connection.ToChannel < 0)
+                    {
+                        continue;
+                    }
+
+                    if (IsInputPatchBypassChannel(connection.ToMode, connection.ToChannel, out _))
+                    {
+                        continue;
+                    }
+
+                    yield return new PluginPassthroughRouteSummary(
+                        mode,
+                        connection.ToChannel,
+                        -1,
+                        $"{CanvasConnectionLabel(connection)} claim");
+                    break;
+                }
+            }
         }
     }
 
@@ -9346,6 +10108,7 @@ public partial class MainWindow : Window
         _selectedPluginGroupId = group.Id;
         _selectedPluginNodeSlot = null;
         EnsureGroupInternalConnections(group);
+        EnsureGroupPortMappings(group);
         AppendLog($"Created VST group: {group.Name}.");
         RefreshEngineCallbackMode();
         RebuildVstNodeList();

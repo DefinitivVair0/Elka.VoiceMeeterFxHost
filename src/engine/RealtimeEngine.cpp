@@ -1682,7 +1682,39 @@ void RealtimeEngine::applyPluginPassthroughRoutes(
         if (source < 0 || source >= MaxChannels)
             continue;
 
-        if (destination < 0 || destination >= buffer.outputChannels || destination >= MaxChannels)
+        if (destination < 0)
+        {
+            if (isInputCallbackSuppressed(suppressInputCallbackChannels, source))
+                continue;
+
+            if (gateSameBufferRoutes)
+            {
+                markStereoPair(gatedPairs, source);
+            }
+            else
+            {
+                const int pairBase = source - (source % 2);
+                const int channels = std::max(0, std::min(buffer.outputChannels, MaxChannels));
+                for (int channel = pairBase; channel < pairBase + 2 && channel < channels; ++channel)
+                {
+                    if (channel < 0 || pluginOutputWritten[static_cast<size_t>(channel)])
+                        continue;
+
+                    float* output = buffer.write[channel];
+                    if (output == nullptr)
+                        continue;
+
+                    for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
+                        output[sample] = 0.0f;
+
+                    pluginOutputWritten[static_cast<size_t>(channel)] = true;
+                }
+            }
+
+            continue;
+        }
+
+        if (destination >= buffer.outputChannels || destination >= MaxChannels)
             continue;
 
         if (isInputCallbackSuppressed(suppressInputCallbackChannels, source) ||
@@ -2042,7 +2074,10 @@ void RealtimeEngine::applySameBufferDirectRoutes(
         if (source < 0 || source >= buffer.outputChannels || source >= MaxChannels)
             continue;
 
-        if (destination < 0 || destination >= buffer.outputChannels || destination >= MaxChannels)
+        if (destination < 0)
+            continue;
+
+        if (destination >= buffer.outputChannels || destination >= MaxChannels)
             continue;
 
         if (isInputCallbackSuppressed(suppressInputCallbackChannels, source) ||

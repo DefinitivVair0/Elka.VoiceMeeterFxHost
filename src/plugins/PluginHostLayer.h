@@ -20,6 +20,12 @@ bool probePluginFile(const std::string& format, const std::string& fileOrIdentif
 int createWorkerPluginProcessor(const std::string& format, const std::string& fileOrIdentifier, int sampleRate, int blockSize, int inputPins, int outputPins, std::string& error);
 bool processWorkerPluginProcessor(int handle, float* planarData, int channelCount, int samples);
 bool openWorkerPluginEditor(int handle, std::string& error);
+std::string workerPluginStateBase64(int handle, std::string& error);
+bool setWorkerPluginStateBase64(int handle, const std::string& stateBase64, std::string& error);
+std::string workerPluginPresetBase64(int handle, std::string& error);
+bool setWorkerPluginPresetBase64(int handle, const std::string& presetBase64, std::string& error);
+std::string workerPluginParameterStateBase64(int handle, std::string& error);
+bool setWorkerPluginParameterStateBase64(int handle, const std::string& parameterStateBase64, std::string& error);
 void pollWorkerPluginMessages(int milliseconds);
 void destroyWorkerPluginProcessor(int handle);
 
@@ -99,7 +105,7 @@ public:
     bool loadDiscoveredPlugin(size_t index, int sampleRate, int maxBlockSize, int routeChannelCount);
     void unloadPlugin() noexcept;
     int addDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount, const std::string& initialStateBase64 = {}, const std::string& initialPresetBase64 = {}, PluginLoadProgressCallback progress = {});
-    int addSandboxedDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount, PluginLoadProgressCallback progress = {});
+    int addSandboxedDiscoveredPluginNode(size_t index, int sampleRate, int maxBlockSize, int mainInputPins, int sidechainInputPins, int outputPins, int layoutId, const std::string& layoutName, int kind, int sourceStart, int sourceCount, const std::string& initialStateBase64 = {}, const std::string& initialPresetBase64 = {}, PluginLoadProgressCallback progress = {});
     void removePluginNode(int slot) noexcept;
     void clearPluginNodes() noexcept;
     bool openPluginEditor(int slot);

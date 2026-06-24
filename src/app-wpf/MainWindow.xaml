@@ -246,7 +246,7 @@
                            Height="68"
                            ScrollViewer.VerticalScrollBarVisibility="Auto"
                            SelectionChanged="PluginFoldersListBox_SelectionChanged"
-                           ToolTip="Custom VST folders scanned together with the normal system VST locations." />
+                           ToolTip="Default and custom VST folders used by Scan." />
                   <Button x:Name="RemovePluginFolderButton"
                           Grid.Column="1"
                           Content="Remove"

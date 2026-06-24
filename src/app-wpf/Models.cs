@@ -768,6 +768,33 @@ internal sealed class NativeEngineClient : IDisposable
         return result >= 0 ? _lastStatus : $"Scan failed: {_lastStatus}";
     }
 
+    public IReadOnlyList<string> DefaultPluginFolders(PluginFormatFilter formatFilter)
+    {
+        if (!_attached)
+        {
+            return [];
+        }
+
+        var buffer = new StringBuilder(16 * 1024);
+        if (ElkaFx_GetDefaultPluginFolders((int)SanitizePluginFormatFilter(formatFilter), buffer, buffer.Capacity) < 0)
+        {
+            return [];
+        }
+
+        return buffer.ToString()
+            .Split(['\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static folder => folder, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static PluginFormatFilter SanitizePluginFormatFilter(PluginFormatFilter formatFilter)
+    {
+        return formatFilter is PluginFormatFilter.All or PluginFormatFilter.Vst2 or PluginFormatFilter.Vst3
+            ? formatFilter
+            : PluginFormatFilter.All;
+    }
+
     public string PluginScanProgress()
     {
         if (!_attached)
@@ -1170,19 +1197,35 @@ internal sealed class NativeEngineClient : IDisposable
             !string.IsNullOrWhiteSpace(initialPresetBase64);
 
         var result = sandboxed
-            ? ElkaFx_AddSandboxedPluginNode(
-                choice.Index,
-                (int)mode,
-                mainInputPins,
-                sidechainInputPins,
-                outputPins,
-                x,
-                y,
-                ref slot,
-                ref loadedInputPins,
-                ref loadedOutputPins,
-                status,
-                status.Capacity)
+            ? hasInitialPluginData
+                ? ElkaFx_AddSandboxedPluginNodeWithState(
+                    choice.Index,
+                    (int)mode,
+                    mainInputPins,
+                    sidechainInputPins,
+                    outputPins,
+                    x,
+                    y,
+                    initialStateBase64 ?? string.Empty,
+                    initialPresetBase64 ?? string.Empty,
+                    ref slot,
+                    ref loadedInputPins,
+                    ref loadedOutputPins,
+                    status,
+                    status.Capacity)
+                : ElkaFx_AddSandboxedPluginNode(
+                    choice.Index,
+                    (int)mode,
+                    mainInputPins,
+                    sidechainInputPins,
+                    outputPins,
+                    x,
+                    y,
+                    ref slot,
+                    ref loadedInputPins,
+                    ref loadedOutputPins,
+                    status,
+                    status.Capacity)
             : !hasInitialPluginData
             ? ElkaFx_AddPluginNode(
                 choice.Index,
@@ -1687,6 +1730,9 @@ internal sealed class NativeEngineClient : IDisposable
     private static extern int ElkaFx_GetPluginIdentifier(int index, StringBuilder buffer, int bufferChars);
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_GetDefaultPluginFolders(int formatFlags, StringBuilder buffer, int bufferChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_ScanDefaultVst3(StringBuilder status, int statusChars);
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
@@ -1727,6 +1773,23 @@ internal sealed class NativeEngineClient : IDisposable
 
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_AddPluginNodeWithState(
+        int pluginIndex,
+        int mode,
+        int mainInputPins,
+        int sidechainInputPins,
+        int outputPins,
+        int x,
+        int y,
+        string initialStateBase64,
+        string initialPresetBase64,
+        ref int slotOut,
+        ref int inputPinsOut,
+        ref int outputPinsOut,
+        StringBuilder status,
+        int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_AddSandboxedPluginNodeWithState(
         int pluginIndex,
         int mode,
         int mainInputPins,

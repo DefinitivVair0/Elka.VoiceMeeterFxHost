@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -118,6 +119,38 @@ bool runOnJuceMessageThread(Callback&& callback)
     });
 
     return result.has_value() && *result;
+}
+
+bool capturePluginStateBase64(juce::AudioPluginInstance& plugin, std::string& stateBase64, std::string& stateError)
+{
+    stateBase64.clear();
+    stateError.clear();
+
+    const auto captured = runOnJuceMessageThread([&]() -> bool
+    {
+        try
+        {
+            juce::MemoryBlock state;
+            plugin.getStateInformation(state);
+            stateBase64 = state.toBase64Encoding().toStdString();
+            return true;
+        }
+        catch (const std::exception& ex)
+        {
+            stateError = ex.what();
+        }
+        catch (...)
+        {
+            stateError = "The plugin state could not be saved.";
+        }
+
+        return false;
+    });
+
+    if (!captured && stateError.empty())
+        stateError = "The plugin state could not be captured on the JUCE message thread.";
+
+    return captured;
 }
 
 bool applyPluginStateBase64(juce::AudioPluginInstance& plugin, const std::string& stateBase64, std::string& stateError)
@@ -734,6 +767,175 @@ std::string pluginKey(const juce::PluginDescription& description)
            description.fileOrIdentifier.toStdString();
 }
 
+std::string decodeJsonStringValue(const std::string& text, size_t quoteIndex)
+{
+    if (quoteIndex >= text.size() || text[quoteIndex] != '"')
+        return {};
+
+    std::string value;
+    for (size_t index = quoteIndex + 1; index < text.size(); ++index)
+    {
+        const char ch = text[index];
+        if (ch == '"')
+            return value;
+
+        if (ch != '\\')
+        {
+            value.push_back(ch);
+            continue;
+        }
+
+        if (++index >= text.size())
+            break;
+
+        switch (text[index])
+        {
+        case '"':
+        case '\\':
+        case '/':
+            value.push_back(text[index]);
+            break;
+        case 'b':
+            value.push_back('\b');
+            break;
+        case 'f':
+            value.push_back('\f');
+            break;
+        case 'n':
+            value.push_back('\n');
+            break;
+        case 'r':
+            value.push_back('\r');
+            break;
+        case 't':
+            value.push_back('\t');
+            break;
+        case 'u':
+            index += std::min<size_t>(4, text.size() - index - 1);
+            value.push_back('?');
+            break;
+        default:
+            value.push_back(text[index]);
+            break;
+        }
+    }
+
+    return {};
+}
+
+std::string jsonStringValueForKey(const std::string& text, const char* key)
+{
+    const std::string quotedKey = std::string("\"") + key + "\"";
+    size_t searchFrom = 0;
+    while (searchFrom < text.size())
+    {
+        const auto keyIndex = text.find(quotedKey, searchFrom);
+        if (keyIndex == std::string::npos)
+            return {};
+
+        auto cursor = keyIndex + quotedKey.size();
+        while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor])))
+            ++cursor;
+
+        if (cursor >= text.size() || text[cursor] != ':')
+        {
+            searchFrom = keyIndex + quotedKey.size();
+            continue;
+        }
+
+        ++cursor;
+        while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor])))
+            ++cursor;
+
+        if (cursor < text.size() && text[cursor] == '"')
+            return decodeJsonStringValue(text, cursor);
+
+        searchFrom = keyIndex + quotedKey.size();
+    }
+
+    return {};
+}
+
+juce::File vst3BundleForIdentifier(const juce::String& identifier)
+{
+    juce::File current(identifier);
+    while (current.getFullPathName().isNotEmpty())
+    {
+        if (current.getFileName().endsWithIgnoreCase(".vst3"))
+            return current;
+
+        const auto parent = current.getParentDirectory();
+        if (parent == current)
+            break;
+
+        current = parent;
+    }
+
+    return {};
+}
+
+juce::File moduleInfoFileForVst3(const juce::String& identifier)
+{
+    const auto bundle = vst3BundleForIdentifier(identifier);
+    if (!bundle.exists())
+        return {};
+
+    const juce::File candidates[] = {
+        bundle.getChildFile("Contents").getChildFile("moduleinfo.json"),
+        bundle.getChildFile("Contents").getChildFile("Resources").getChildFile("moduleinfo.json"),
+        bundle.getChildFile("moduleinfo.json")
+    };
+
+    for (const auto& candidate : candidates)
+    {
+        if (candidate.existsAsFile())
+            return candidate;
+    }
+
+    return {};
+}
+
+juce::String cleanedPluginFileName(const juce::String& identifier)
+{
+    const juce::File file(identifier);
+    auto name = file.getFileNameWithoutExtension();
+    if (name.isEmpty())
+        name = identifier;
+
+    name = name.replaceCharacter('_', ' ');
+    name = name.trim();
+    return name.isNotEmpty() ? name : identifier;
+}
+
+juce::PluginDescription nameOnlyDescriptionForCandidate(const juce::String& formatName, const juce::String& identifier)
+{
+    auto description = lazyDescriptionForCandidate(formatName, identifier);
+    description.name = cleanedPluginFileName(identifier);
+    description.category = "NameOnly";
+
+    if (!formatName.equalsIgnoreCase("VST3"))
+        return description;
+
+    const auto moduleInfo = moduleInfoFileForVst3(identifier);
+    if (!moduleInfo.existsAsFile())
+        return description;
+
+    const auto text = moduleInfo.loadFileAsString().toStdString();
+    const auto name = jsonStringValueForKey(text, "Name");
+    if (!name.empty())
+        description.name = juce::String::fromUTF8(name.c_str());
+
+    const auto vendor = jsonStringValueForKey(text, "Vendor");
+    if (!vendor.empty())
+        description.manufacturerName = juce::String::fromUTF8(vendor.c_str());
+
+    const auto category = jsonStringValueForKey(text, "Category");
+    if (!category.empty())
+        description.category = juce::String::fromUTF8(category.c_str());
+
+    return description;
+}
+
 void scanFormatIntoList(
     const juce::String& formatName,
     const std::vector<std::string>& paths,
@@ -792,19 +994,30 @@ void scanFormatIntoList(
             if (!candidateSignature.path.empty())
                 checkedCandidates[candidateKey] = candidateSignature;
 
-            auto lazyDescription = lazyDescriptionForCandidate(formatName, fileOrIdentifier);
-            const auto key = pluginKey(lazyDescription);
+            if (progress)
+            {
+                progress(
+                    "Reading " + formatText + " name",
+                    fileOrIdentifier.toStdString(),
+                    static_cast<int>(candidateIndex + 1),
+                    static_cast<int>(candidates.size()));
+            }
+
+            auto description = nameOnlyDescriptionForCandidate(formatName, fileOrIdentifier);
+
+            const auto key = pluginKey(description);
             if (!seen.insert(key).second)
             {
-                report << "  Duplicate skipped: " << fileOrIdentifier.toStdString() << "\n";
+                report << "  Duplicate skipped: " << description.name.toStdString() << " | " << fileOrIdentifier.toStdString() << "\n";
                 continue;
             }
 
-            summaries.push_back(toSummary(lazyDescription));
-            descriptions.push_back(lazyDescription);
+            summaries.push_back(toSummary(description));
+            descriptions.push_back(description);
             lazyDescriptions.push_back(1);
             knownFiles.insert(normalizedCandidate);
-            report << "  Added lazy candidate: " << fileOrIdentifier.toStdString() << "\n";
+            checkedCandidates[pluginCandidateKey(description)] = pluginCandidateSignature(description.fileOrIdentifier);
+            report << "  Added name-only candidate: " << description.name.toStdString() << " | " << fileOrIdentifier.toStdString() << "\n";
         }
     }
 }
@@ -1216,12 +1429,20 @@ std::unique_ptr<HostedVst3Processor> createHostedProcessorFromFile(
 
 constexpr DWORD SandboxReadyTimeoutMs = 30000;
 constexpr DWORD SandboxControlTimeoutMs = 10000;
+constexpr DWORD SandboxStateTimeoutMs = 30000;
 constexpr DWORD SandboxMagic = 0x414B4C45; // ELKA
 constexpr DWORD SandboxVersion = 1;
 constexpr int SandboxHeaderBytes = 64;
+constexpr int SandboxStateBytes = 8 * 1024 * 1024;
 constexpr int SandboxMaxPins = 32;
 constexpr LONG SandboxCommandAudio = 1;
 constexpr LONG SandboxCommandOpenEditor = 2;
+constexpr LONG SandboxCommandGetState = 3;
+constexpr LONG SandboxCommandSetState = 4;
+constexpr LONG SandboxCommandGetPreset = 5;
+constexpr LONG SandboxCommandSetPreset = 6;
+constexpr LONG SandboxCommandGetParameters = 7;
+constexpr LONG SandboxCommandSetParameters = 8;
 volatile LONG sandboxGlobalSequence = 0;
 
 struct SandboxAudioHeader
@@ -1237,7 +1458,9 @@ struct SandboxAudioHeader
     volatile LONG responseId = 0;
     volatile LONG status = 0;
     volatile LONG command = 0;
-    LONG reserved[5] {};
+    volatile LONG textByteCount = 0;
+    LONG textCapacity = 0;
+    LONG reserved[3] {};
 };
 
 static_assert(sizeof(SandboxAudioHeader) <= SandboxHeaderBytes);
@@ -1469,7 +1692,135 @@ public:
         return true;
     }
 
+    std::string stateBase64(std::string& error)
+    {
+        std::string value;
+        captureTextBase64Command(SandboxCommandGetState, value, error, "state");
+        return value;
+    }
+
+    bool setStateBase64(const std::string& stateBase64, std::string& error)
+    {
+        return applyTextBase64Command(SandboxCommandSetState, stateBase64, error, "state");
+    }
+
+    std::string presetBase64(std::string& error)
+    {
+        std::string value;
+        captureTextBase64Command(SandboxCommandGetPreset, value, error, "preset");
+        return value;
+    }
+
+    bool setPresetBase64(const std::string& presetBase64, std::string& error)
+    {
+        return applyTextBase64Command(SandboxCommandSetPreset, presetBase64, error, "preset");
+    }
+
+    std::string parameterStateBase64(std::string& error)
+    {
+        std::string value;
+        captureTextBase64Command(SandboxCommandGetParameters, value, error, "parameter snapshot");
+        return value;
+    }
+
+    bool setParameterStateBase64(const std::string& parameterStateBase64, std::string& error)
+    {
+        return applyTextBase64Command(SandboxCommandSetParameters, parameterStateBase64, error, "parameter snapshot");
+    }
+
 private:
+    bool captureTextBase64Command(LONG command, std::string& value, std::string& error, const char* label)
+    {
+        value.clear();
+        error.clear();
+        if (!ready || header == nullptr || stateData == nullptr || stateDataBytes <= 1 || controlEvent == nullptr || responseEvent == nullptr)
+        {
+            error = std::string("Sandboxed plugin worker is not ready for ") + label + " capture.";
+            return false;
+        }
+
+        ScopedSandboxIpcFlag ipc(ipcBusy, 1000);
+        if (!ipc.isLocked())
+        {
+            error = std::string("Sandboxed plugin worker is busy. Try saving ") + label + " again.";
+            return false;
+        }
+
+        std::fill_n(stateData, static_cast<size_t>(stateDataBytes), static_cast<unsigned char>(0));
+        InterlockedExchange(&header->textByteCount, 0);
+        InterlockedExchange(&header->command, command);
+        const LONG request = InterlockedIncrement(&requestCounter);
+        InterlockedExchange(&header->requestId, request);
+        ResetEvent(responseEvent);
+        SetEvent(controlEvent);
+
+        const DWORD wait = WaitForSingleObject(responseEvent, SandboxStateTimeoutMs);
+        if (wait != WAIT_OBJECT_0 || header->responseId != request)
+        {
+            error = std::string("Sandboxed plugin worker did not answer the ") + label + " capture request.";
+            return false;
+        }
+
+        if (header->status < 0)
+        {
+            error = std::string("Sandboxed plugin ") + label + " capture failed in the worker.";
+            return false;
+        }
+
+        const auto byteCount = std::clamp(static_cast<int>(header->textByteCount), 0, stateDataBytes);
+        value.assign(reinterpret_cast<const char*>(stateData), static_cast<size_t>(byteCount));
+        return true;
+    }
+
+    bool applyTextBase64Command(LONG command, const std::string& value, std::string& error, const char* label)
+    {
+        error.clear();
+        if (value.empty())
+            return true;
+
+        if (!ready || header == nullptr || stateData == nullptr || stateDataBytes <= 1 || controlEvent == nullptr || responseEvent == nullptr)
+        {
+            error = std::string("Sandboxed plugin worker is not ready for ") + label + " restore.";
+            return false;
+        }
+
+        if (value.size() >= static_cast<size_t>(stateDataBytes))
+        {
+            error = std::string("Saved sandboxed plugin ") + label + " is too large for the worker transfer buffer.";
+            return false;
+        }
+
+        ScopedSandboxIpcFlag ipc(ipcBusy, 1000);
+        if (!ipc.isLocked())
+        {
+            error = std::string("Sandboxed plugin worker is busy. Try restoring ") + label + " again.";
+            return false;
+        }
+
+        std::fill_n(stateData, static_cast<size_t>(stateDataBytes), static_cast<unsigned char>(0));
+        std::memcpy(stateData, value.data(), value.size());
+        InterlockedExchange(&header->textByteCount, static_cast<LONG>(value.size()));
+        InterlockedExchange(&header->command, command);
+        const LONG request = InterlockedIncrement(&requestCounter);
+        InterlockedExchange(&header->requestId, request);
+        ResetEvent(responseEvent);
+        SetEvent(controlEvent);
+
+        const DWORD wait = WaitForSingleObject(responseEvent, SandboxStateTimeoutMs);
+        if (wait != WAIT_OBJECT_0 || header->responseId != request)
+        {
+            error = std::string("Sandboxed plugin worker did not answer the ") + label + " restore request.";
+            return false;
+        }
+
+        if (header->status < 0)
+        {
+            error = std::string("Sandboxed plugin ") + label + " restore failed in the worker.";
+            return false;
+        }
+
+        return true;
+    }
     void start(const std::string& format, const std::string& fileOrIdentifier, int sampleRate, std::string& error)
     {
         error.clear();
@@ -1490,7 +1841,7 @@ private:
         shutdownEventName = baseName + L"_shutdown";
 
         const size_t audioBytes = static_cast<size_t>(processChannels) * static_cast<size_t>(maxBlockSize) * sizeof(float);
-        const size_t mappingBytes = SandboxHeaderBytes + audioBytes;
+        const size_t mappingBytes = SandboxHeaderBytes + audioBytes + static_cast<size_t>(SandboxStateBytes);
         mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(mappingBytes), mapName.c_str());
         if (mapping == nullptr)
         {
@@ -1515,6 +1866,9 @@ private:
         header->inputPins = inputPinCount;
         header->outputPins = outputPinCount;
         audioData = reinterpret_cast<float*>(mappedView + SandboxHeaderBytes);
+        stateData = mappedView + SandboxHeaderBytes + audioBytes;
+        stateDataBytes = SandboxStateBytes;
+        header->textCapacity = stateDataBytes;
 
         requestEvent = CreateEventW(nullptr, FALSE, FALSE, requestEventName.c_str());
         controlEvent = CreateEventW(nullptr, FALSE, FALSE, controlEventName.c_str());
@@ -1603,6 +1957,8 @@ private:
         }
 
         audioData = nullptr;
+        stateData = nullptr;
+        stateDataBytes = 0;
         header = nullptr;
         closeHandleIfValid(mapping);
     }
@@ -1695,6 +2051,8 @@ private:
     unsigned char* mappedView = nullptr;
     SandboxAudioHeader* header = nullptr;
     float* audioData = nullptr;
+    unsigned char* stateData = nullptr;
+    int stateDataBytes = 0;
     volatile LONG requestCounter = 0;
     volatile LONG ipcBusy = 0;
     int inputPinCount = 2;
@@ -1919,6 +2277,129 @@ bool openWorkerPluginEditor(int handle, std::string& error)
 
     return opened;
 #else
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return false;
+#endif
+}
+
+
+juce::AudioPluginInstance* workerPluginInstanceLocked(int handle, std::string& error)
+{
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    const auto found = workerSessions.find(handle);
+    if (found == workerSessions.end() || found->second == nullptr || found->second->processor == nullptr)
+    {
+        error = "Worker plugin session was not found.";
+        return nullptr;
+    }
+
+    auto* plugin = found->second->processor->pluginInstance();
+    if (plugin == nullptr)
+        error = "Worker plugin instance was not found.";
+    return plugin;
+#else
+    (void) handle;
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return nullptr;
+#endif
+}
+
+std::string workerPluginStateBase64(int handle, std::string& error)
+{
+    error.clear();
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    std::lock_guard lock(workerSessionsMutex);
+    auto* plugin = workerPluginInstanceLocked(handle, error);
+    if (plugin == nullptr)
+        return {};
+
+    std::string stateBase64;
+    if (!capturePluginStateBase64(*plugin, stateBase64, error))
+        return {};
+
+    return stateBase64;
+#else
+    (void) handle;
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return {};
+#endif
+}
+
+bool setWorkerPluginStateBase64(int handle, const std::string& stateBase64, std::string& error)
+{
+    error.clear();
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    std::lock_guard lock(workerSessionsMutex);
+    auto* plugin = workerPluginInstanceLocked(handle, error);
+    return plugin != nullptr && applyPluginStateBase64(*plugin, stateBase64, error);
+#else
+    (void) handle;
+    (void) stateBase64;
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return false;
+#endif
+}
+
+std::string workerPluginPresetBase64(int handle, std::string& error)
+{
+    error.clear();
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    std::lock_guard lock(workerSessionsMutex);
+    auto* plugin = workerPluginInstanceLocked(handle, error);
+    if (plugin == nullptr)
+        return {};
+
+    std::string presetBase64;
+    if (!capturePluginPresetBase64(*plugin, presetBase64, error))
+        return {};
+
+    return presetBase64;
+#else
+    (void) handle;
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return {};
+#endif
+}
+
+bool setWorkerPluginPresetBase64(int handle, const std::string& presetBase64, std::string& error)
+{
+    error.clear();
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    std::lock_guard lock(workerSessionsMutex);
+    auto* plugin = workerPluginInstanceLocked(handle, error);
+    return plugin != nullptr && applyPluginPresetBase64(*plugin, presetBase64, error);
+#else
+    (void) handle;
+    (void) presetBase64;
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return false;
+#endif
+}
+
+std::string workerPluginParameterStateBase64(int handle, std::string& error)
+{
+    error.clear();
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    std::lock_guard lock(workerSessionsMutex);
+    auto* plugin = workerPluginInstanceLocked(handle, error);
+    return plugin == nullptr ? std::string {} : capturePluginParameterStateBase64(*plugin, error);
+#else
+    (void) handle;
+    error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
+    return {};
+#endif
+}
+
+bool setWorkerPluginParameterStateBase64(int handle, const std::string& parameterStateBase64, std::string& error)
+{
+    error.clear();
+#if ELKA_ENABLE_JUCE_PLUGIN_HOST
+    std::lock_guard lock(workerSessionsMutex);
+    auto* plugin = workerPluginInstanceLocked(handle, error);
+    return plugin != nullptr && applyPluginParameterStateBase64(*plugin, parameterStateBase64, error);
+#else
+    (void) handle;
+    (void) parameterStateBase64;
     error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
     return false;
 #endif
@@ -2165,11 +2646,18 @@ int PluginHostLayer::scanPluginPaths(const std::vector<std::string>& paths, bool
     std::vector<unsigned char> keptLazyDescriptions;
     int removedMissing = 0;
     int removedOutsideFolders = 0;
+    int removedLazy = 0;
 
     for (size_t index = 0; index < impl->descriptions.size(); ++index)
     {
         const auto& description = impl->descriptions[index];
         const auto lazy = index < impl->lazyDescriptions.size() ? impl->lazyDescriptions[index] : static_cast<unsigned char>(0);
+        if (lazy != 0)
+        {
+            ++removedLazy;
+            continue;
+        }
+
         if (!pluginFileExists(description))
         {
             ++removedMissing;
@@ -2227,6 +2715,8 @@ int PluginHostLayer::scanPluginPaths(const std::vector<std::string>& paths, bool
         report << "Removed missing plugin entries: " << removedMissing << "\n";
     if (removedOutsideFolders > 0)
         report << "Removed entries outside selected folders: " << removedOutsideFolders << "\n";
+    if (removedLazy > 0)
+        report << "Refreshed name-only cache entries: " << removedLazy << "\n";
     if (removedCheckedCandidates > 0)
         report << "Removed stale checked candidates: " << removedCheckedCandidates << "\n";
 
@@ -2827,6 +3317,8 @@ int PluginHostLayer::addSandboxedDiscoveredPluginNode(
     int kind,
     int sourceStart,
     int sourceCount,
+    const std::string& initialStateBase64,
+    const std::string& initialPresetBase64,
     PluginLoadProgressCallback progress)
 {
     error.clear();
@@ -2890,6 +3382,20 @@ int PluginHostLayer::addSandboxedDiscoveredPluginNode(
         return -1;
     }
 
+    std::string stateRestoreWarning;
+    if (!initialPresetBase64.empty())
+    {
+        if (progress)
+            progress("Restoring saved sandboxed VST3 preset", detail);
+        processor->setPresetBase64(initialPresetBase64, stateRestoreWarning);
+    }
+    if (!initialStateBase64.empty())
+    {
+        if (progress)
+            progress("Restoring saved sandboxed plugin state", detail);
+        processor->setStateBase64(initialStateBase64, stateRestoreWarning);
+    }
+
     if (progress)
         progress("Installing sandboxed plugin into realtime graph", detail);
 
@@ -2919,6 +3425,8 @@ int PluginHostLayer::addSandboxedDiscoveredPluginNode(
         0
     };
     impl->loadedName = summary.name;
+    if (!stateRestoreWarning.empty())
+        error = stateRestoreWarning;
 
     if (progress)
         progress("Sandboxed plugin node loaded", detail);
@@ -3063,57 +3571,26 @@ std::string PluginHostLayer::pluginNodeStateBase64(int slot)
         return {};
     }
 
-    auto* processor = dynamic_cast<HostedVst3Processor*>(impl->nodeProcessors[static_cast<size_t>(slot)].get());
-    if (processor == nullptr || processor->pluginInstance() == nullptr)
+    auto* realtime = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (auto* processor = dynamic_cast<HostedVst3Processor*>(realtime))
     {
-        error = "Sandboxed VST state capture is not wired yet.";
-        return {};
-    }
-
-    try
-    {
-        std::string stateBase64;
-        std::string stateError;
-        const auto saved = runOnJuceMessageThread([&]() -> bool
+        if (processor->pluginInstance() == nullptr)
         {
-            try
-            {
-                juce::MemoryBlock state;
-                processor->pluginInstance()->getStateInformation(state);
-                stateBase64 = state.toBase64Encoding().toStdString();
-                return true;
-            }
-            catch (const std::exception& ex)
-            {
-                stateError = ex.what();
-            }
-            catch (...)
-            {
-                stateError = "The plugin state could not be saved.";
-            }
-
-            return false;
-        });
-
-        if (!saved)
-        {
-            error = stateError.empty()
-                ? "The plugin state could not be captured on the JUCE message thread."
-                : stateError;
+            error = "VST plugin instance was not found.";
             return {};
         }
 
+        std::string stateBase64;
+        if (!capturePluginStateBase64(*processor->pluginInstance(), stateBase64, error))
+            return {};
+
         return stateBase64;
     }
-    catch (const std::exception& ex)
-    {
-        error = ex.what();
-    }
-    catch (...)
-    {
-        error = "The plugin state could not be saved.";
-    }
 
+    if (auto* sandboxed = dynamic_cast<SandboxedPluginProcessor*>(realtime))
+        return sandboxed->stateBase64(error);
+
+    error = "No VST node is selected.";
     return {};
 #else
     error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
@@ -3132,34 +3609,25 @@ bool PluginHostLayer::setPluginNodeStateBase64(int slot, const std::string& stat
         return false;
     }
 
-    auto* processor = dynamic_cast<HostedVst3Processor*>(impl->nodeProcessors[static_cast<size_t>(slot)].get());
-    if (processor == nullptr || processor->pluginInstance() == nullptr)
-    {
-        error = "Sandboxed VST state restore is not wired yet.";
-        return false;
-    }
-
     if (stateBase64.empty())
         return true;
 
-    try
+    auto* realtime = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (auto* processor = dynamic_cast<HostedVst3Processor*>(realtime))
     {
-        std::string stateError;
-        const auto restored = applyPluginStateBase64(*processor->pluginInstance(), stateBase64, stateError);
-        if (!restored)
-            error = stateError;
+        if (processor->pluginInstance() == nullptr)
+        {
+            error = "VST plugin instance was not found.";
+            return false;
+        }
 
-        return restored;
-    }
-    catch (const std::exception& ex)
-    {
-        error = ex.what();
-    }
-    catch (...)
-    {
-        error = "The plugin state could not be restored.";
+        return applyPluginStateBase64(*processor->pluginInstance(), stateBase64, error);
     }
 
+    if (auto* sandboxed = dynamic_cast<SandboxedPluginProcessor*>(realtime))
+        return sandboxed->setStateBase64(stateBase64, error);
+
+    error = "No VST node is selected.";
     return false;
 #else
     error = "JUCE is not available. Put JUCE in external/JUCE and rebuild.";
@@ -3178,10 +3646,14 @@ std::string PluginHostLayer::pluginNodePresetBase64(int slot)
         return {};
     }
 
-    auto* processor = dynamic_cast<HostedVst3Processor*>(impl->nodeProcessors[static_cast<size_t>(slot)].get());
+    auto* realtime = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (auto* sandboxed = dynamic_cast<SandboxedPluginProcessor*>(realtime))
+        return sandboxed->presetBase64(error);
+
+    auto* processor = dynamic_cast<HostedVst3Processor*>(realtime);
     if (processor == nullptr || processor->pluginInstance() == nullptr)
     {
-        error = "Sandboxed VST preset capture is not wired yet.";
+        error = "No VST node is selected.";
         return {};
     }
 
@@ -3224,10 +3696,14 @@ bool PluginHostLayer::setPluginNodePresetBase64(int slot, const std::string& pre
         return false;
     }
 
-    auto* processor = dynamic_cast<HostedVst3Processor*>(impl->nodeProcessors[static_cast<size_t>(slot)].get());
+    auto* realtime = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (auto* sandboxed = dynamic_cast<SandboxedPluginProcessor*>(realtime))
+        return sandboxed->setPresetBase64(presetBase64, error);
+
+    auto* processor = dynamic_cast<HostedVst3Processor*>(realtime);
     if (processor == nullptr || processor->pluginInstance() == nullptr)
     {
-        error = "Sandboxed VST preset restore is not wired yet.";
+        error = "No VST node is selected.";
         return false;
     }
 
@@ -3270,10 +3746,14 @@ std::string PluginHostLayer::pluginNodeParameterStateBase64(int slot)
         return {};
     }
 
-    auto* processor = dynamic_cast<HostedVst3Processor*>(impl->nodeProcessors[static_cast<size_t>(slot)].get());
+    auto* realtime = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (auto* sandboxed = dynamic_cast<SandboxedPluginProcessor*>(realtime))
+        return sandboxed->parameterStateBase64(error);
+
+    auto* processor = dynamic_cast<HostedVst3Processor*>(realtime);
     if (processor == nullptr || processor->pluginInstance() == nullptr)
     {
-        error = "Sandboxed VST parameter capture is not wired yet.";
+        error = "No VST node is selected.";
         return {};
     }
 
@@ -3299,10 +3779,14 @@ bool PluginHostLayer::setPluginNodeParameterStateBase64(int slot, const std::str
         return false;
     }
 
-    auto* processor = dynamic_cast<HostedVst3Processor*>(impl->nodeProcessors[static_cast<size_t>(slot)].get());
+    auto* realtime = impl->nodeProcessors[static_cast<size_t>(slot)].get();
+    if (auto* sandboxed = dynamic_cast<SandboxedPluginProcessor*>(realtime))
+        return sandboxed->setParameterStateBase64(parameterStateBase64, error);
+
+    auto* processor = dynamic_cast<HostedVst3Processor*>(realtime);
     if (processor == nullptr || processor->pluginInstance() == nullptr)
     {
-        error = "Sandboxed VST parameter restore is not wired yet.";
+        error = "No VST node is selected.";
         return false;
     }
 

@@ -1503,6 +1503,48 @@ int scanPluginFoldersNative(
     setScanProgress(false, "Plugin scan complete", "Plugin scan complete: " + std::to_string(count) + " plugin(s)", count, count);
     return count;
 }
+
+std::wstring joinPluginFolders(const std::vector<std::string>& folders)
+{
+    std::wstring text;
+    for (const auto& folder : folders)
+    {
+        if (!text.empty())
+            text += L"\n";
+        text += widenUtf8(folder);
+    }
+
+    return text;
+}
+
+int writeUtf8WorkerText(const std::string& value, char* buffer, int bufferBytes, wchar_t* status, int statusChars, const wchar_t* label)
+{
+    if (buffer == nullptr || bufferBytes <= 0)
+    {
+        writeWide(std::wstring(label) + L" failed: worker transfer buffer is not available.", status, statusChars);
+        return -1;
+    }
+
+    if (value.size() >= static_cast<size_t>(bufferBytes))
+    {
+        writeWide(std::wstring(label) + L" failed: saved data is too large for the worker transfer buffer.", status, statusChars);
+        return -1;
+    }
+
+    if (!value.empty())
+        std::memcpy(buffer, value.data(), value.size());
+    buffer[value.size()] = '\0';
+    writeWide(std::wstring(label) + L" complete.", status, statusChars);
+    return static_cast<int>(value.size());
+}
+
+std::string readUtf8WorkerText(const char* buffer, int bufferBytes)
+{
+    if (buffer == nullptr || bufferBytes <= 0)
+        return {};
+
+    return std::string(buffer, buffer + bufferBytes);
+}
 }
 
 extern "C"
@@ -2128,6 +2170,15 @@ __declspec(dllexport) int __cdecl ElkaFx_GetPluginIdentifier(int index, wchar_t*
     return 0;
 }
 
+__declspec(dllexport) int __cdecl ElkaFx_GetDefaultPluginFolders(int formatFlags, wchar_t* buffer, int bufferChars)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    const auto folders = target.plugins.defaultPluginSearchPaths(normalizePluginScanFlags(formatFlags));
+    writeWide(joinPluginFolders(folders), buffer, bufferChars);
+    return static_cast<int>(folders.size());
+}
+
 __declspec(dllexport) int __cdecl ElkaFx_ScanDefaultVst3(wchar_t* status, int statusChars)
 {
     return scanPluginFoldersNative(L"", 1, ScanFormatVst3, status, statusChars);
@@ -2260,6 +2311,114 @@ __declspec(dllexport) int __cdecl ElkaFx_WorkerOpenPluginEditor(
     return -1;
 }
 
+__declspec(dllexport) int __cdecl ElkaFx_WorkerGetPluginState(
+    int handle,
+    char* utf8Buffer,
+    int bufferBytes,
+    wchar_t* status,
+    int statusChars)
+{
+    std::string error;
+    const auto value = workerPluginStateBase64(handle, error);
+    if (!error.empty())
+    {
+        writeWide(L"Worker plugin state capture failed: " + widenUtf8(error), status, statusChars);
+        return -1;
+    }
+
+    return writeUtf8WorkerText(value, utf8Buffer, bufferBytes, status, statusChars, L"Worker plugin state capture");
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_WorkerSetPluginState(
+    int handle,
+    const char* utf8Buffer,
+    int bufferBytes,
+    wchar_t* status,
+    int statusChars)
+{
+    std::string error;
+    if (setWorkerPluginStateBase64(handle, readUtf8WorkerText(utf8Buffer, bufferBytes), error))
+    {
+        writeWide(L"Worker plugin state restored.", status, statusChars);
+        return 0;
+    }
+
+    writeWide(L"Worker plugin state restore failed: " + widenUtf8(error), status, statusChars);
+    return -1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_WorkerGetPluginPreset(
+    int handle,
+    char* utf8Buffer,
+    int bufferBytes,
+    wchar_t* status,
+    int statusChars)
+{
+    std::string error;
+    const auto value = workerPluginPresetBase64(handle, error);
+    if (!error.empty())
+    {
+        writeWide(L"Worker plugin preset capture failed: " + widenUtf8(error), status, statusChars);
+        return -1;
+    }
+
+    return writeUtf8WorkerText(value, utf8Buffer, bufferBytes, status, statusChars, L"Worker plugin preset capture");
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_WorkerSetPluginPreset(
+    int handle,
+    const char* utf8Buffer,
+    int bufferBytes,
+    wchar_t* status,
+    int statusChars)
+{
+    std::string error;
+    if (setWorkerPluginPresetBase64(handle, readUtf8WorkerText(utf8Buffer, bufferBytes), error))
+    {
+        writeWide(L"Worker plugin preset restored.", status, statusChars);
+        return 0;
+    }
+
+    writeWide(L"Worker plugin preset restore failed: " + widenUtf8(error), status, statusChars);
+    return -1;
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_WorkerGetPluginParameterState(
+    int handle,
+    char* utf8Buffer,
+    int bufferBytes,
+    wchar_t* status,
+    int statusChars)
+{
+    std::string error;
+    const auto value = workerPluginParameterStateBase64(handle, error);
+    if (!error.empty())
+    {
+        writeWide(L"Worker plugin parameter capture failed: " + widenUtf8(error), status, statusChars);
+        return -1;
+    }
+
+    return writeUtf8WorkerText(value, utf8Buffer, bufferBytes, status, statusChars, L"Worker plugin parameter capture");
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_WorkerSetPluginParameterState(
+    int handle,
+    const char* utf8Buffer,
+    int bufferBytes,
+    wchar_t* status,
+    int statusChars)
+{
+    std::string error;
+    if (setWorkerPluginParameterStateBase64(handle, readUtf8WorkerText(utf8Buffer, bufferBytes), error))
+    {
+        writeWide(L"Worker plugin parameter state restored.", status, statusChars);
+        return 0;
+    }
+
+    writeWide(L"Worker plugin parameter restore failed: " + widenUtf8(error), status, statusChars);
+    return -1;
+}
+
 __declspec(dllexport) void __cdecl ElkaFx_WorkerPollMessages(int milliseconds)
 {
     pollWorkerPluginMessages(milliseconds);
@@ -2333,6 +2492,8 @@ int addPluginNodeNative(
             static_cast<int>(streamKind),
             0,
             layoutChannels,
+            narrowWide(initialStateBase64),
+            narrowWide(initialPresetBase64),
             [](const std::string& stage, const std::string& detail) {
                 setPluginLoadProgress(true, stage, detail);
             })
@@ -2460,6 +2621,40 @@ __declspec(dllexport) int __cdecl ElkaFx_AddSandboxedPluginNode(
         y,
         nullptr,
         nullptr,
+        slotOut,
+        inputPinsOut,
+        outputPinsOut,
+        status,
+        statusChars,
+        true);
+}
+
+__declspec(dllexport) int __cdecl ElkaFx_AddSandboxedPluginNodeWithState(
+    int pluginIndex,
+    int mode,
+    int mainInputPins,
+    int sidechainInputPins,
+    int outputPins,
+    int x,
+    int y,
+    const wchar_t* initialStateBase64,
+    const wchar_t* initialPresetBase64,
+    int* slotOut,
+    int* inputPinsOut,
+    int* outputPinsOut,
+    wchar_t* status,
+    int statusChars)
+{
+    return addPluginNodeNative(
+        pluginIndex,
+        mode,
+        mainInputPins,
+        sidechainInputPins,
+        outputPins,
+        x,
+        y,
+        initialStateBase64,
+        initialPresetBase64,
         slotOut,
         inputPinsOut,
         outputPinsOut,
