@@ -3,6 +3,8 @@
 #include "engine/RealtimeEngine.h"
 #include "voicemeeter/VoicemeeterRemoteApi.h"
 
+#include <atomic>
+#include <cstdint>
 #include <string>
 
 namespace elka
@@ -22,6 +24,18 @@ enum class ConnectionState
     Running
 };
 
+struct CallbackCommandStats
+{
+    uint64_t total = 0;
+    uint64_t starting = 0;
+    uint64_t ending = 0;
+    uint64_t change = 0;
+    uint64_t bufferIn = 0;
+    uint64_t bufferOut = 0;
+    uint64_t bufferMain = 0;
+    long lastCommand = 0;
+};
+
 class VoicemeeterClient
 {
 public:
@@ -38,6 +52,7 @@ public:
     void setPreferredMode(CallbackMode mode) noexcept;
     ConnectionState state() const noexcept;
     CallbackMode mode() const noexcept;
+    CallbackCommandStats callbackStats() const noexcept;
     std::wstring statusText() const;
     std::wstring dllPath() const;
     bool getConfiguredSampleRate(int& sampleRate) const noexcept;
@@ -53,10 +68,19 @@ private:
     static long toApiMode(CallbackMode mode) noexcept;
     static CallbackStreamKind toStreamKind(CallbackMode mode) noexcept;
     static CallbackStreamKind toStreamKindForCommand(long command, CallbackMode fallbackMode) noexcept;
+    void resetCallbackStats() noexcept;
 
     RealtimeEngine& engine;
     VoicemeeterRemoteApi api;
     ConnectionState connectionState = ConnectionState::Disconnected;
     CallbackMode callbackMode = CallbackMode::InputInsert;
+    std::atomic<uint64_t> callbackCommandCount { 0 };
+    std::atomic<uint64_t> callbackStartingCount { 0 };
+    std::atomic<uint64_t> callbackEndingCount { 0 };
+    std::atomic<uint64_t> callbackChangeCount { 0 };
+    std::atomic<uint64_t> callbackBufferInCount { 0 };
+    std::atomic<uint64_t> callbackBufferOutCount { 0 };
+    std::atomic<uint64_t> callbackBufferMainCount { 0 };
+    std::atomic<long> callbackLastCommand { 0 };
 };
 }

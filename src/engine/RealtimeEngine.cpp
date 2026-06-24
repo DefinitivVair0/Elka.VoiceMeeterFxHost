@@ -1,6 +1,7 @@
 #include "engine/RealtimeEngine.h"
 
 #include <algorithm>
+#include <memory>
 #include <xmmintrin.h>
 #include <windows.h>
 
@@ -36,7 +37,6 @@ constexpr int PingPulseSamples = 8;
 constexpr float PingPulseAmplitude = 0.80f;
 constexpr float PingDetectThreshold = 0.18f;
 constexpr int DelaySmoothingMilliseconds = 8;
-constexpr int RouteStreamCount = 4;
 
 const float* sourceChannelPointer(AudioBufferView buffer, int readOffset, int channel) noexcept
 {
@@ -209,12 +209,15 @@ int delaySmoothingStepSamples(int sampleRate, int blockSize) noexcept
     return std::max(1, std::max(blockSize, fromMilliseconds));
 }
 
-size_t routeBufferOffset(int streamIndex, int route, int length) noexcept
+size_t lineBufferOffset(int lineIndex, int length) noexcept
 {
-    return ((static_cast<size_t>(std::clamp(streamIndex, 0, RouteStreamCount - 1)) *
-                static_cast<size_t>(RealtimeEngine::MaxDirectRoutes)) +
-            static_cast<size_t>(std::clamp(route, 0, RealtimeEngine::MaxDirectRoutes - 1))) *
+    return static_cast<size_t>(std::max(0, lineIndex)) *
         static_cast<size_t>(std::max(0, length));
+}
+
+size_t pluginBusFlatIndex(int slot, int pin) noexcept
+{
+    return static_cast<size_t>((slot * RealtimeEngine::MaxPluginPins) + pin);
 }
 
 class ScopedDenormalFlush
@@ -274,24 +277,7 @@ RealtimeEngine::RealtimeEngine() noexcept
             gains[route] = 1.0f;
     }
 
-    try
-    {
-        pluginBusBuffer.assign(
-            static_cast<size_t>(MaxPluginSlots) *
-                static_cast<size_t>(MaxPluginPins) *
-                static_cast<size_t>(MaxPluginScratchSamples),
-            0.0f);
-        pluginPassthroughScratchBuffer.assign(
-            static_cast<size_t>(DelayStreamCount) *
-                static_cast<size_t>(MaxDirectRoutes) *
-                static_cast<size_t>(MaxPluginScratchSamples),
-            0.0f);
-    }
-    catch (...)
-    {
-        pluginBusBuffer.clear();
-        pluginPassthroughScratchBuffer.clear();
-    }
+    rebuildDynamicPluginScratchBuffers();
 }
 
 void RealtimeEngine::setEnabled(bool shouldEnable) noexcept
@@ -303,6 +289,8 @@ void RealtimeEngine::setEnabled(bool shouldEnable) noexcept
 
     for (int channel = start; channel < start + count; ++channel)
         enabledBank[channel].store(shouldEnable, std::memory_order_release);
+
+    refreshDynamicBuffersForCurrentSampleRate();
 }
 
 bool RealtimeEngine::isEnabled() const noexcept
@@ -347,6 +335,7 @@ void RealtimeEngine::setChannelEnabled(CallbackStreamKind kind, int channel, boo
         return;
 
     enableBankFor(kind)[channel].store(shouldEnable, std::memory_order_release);
+    refreshDynamicBuffersForCurrentSampleRate();
 }
 
 bool RealtimeEngine::isChannelEnabled(CallbackStreamKind kind, int channel) const noexcept
@@ -379,6 +368,7 @@ void RealtimeEngine::setChannelDelayMilliseconds(CallbackStreamKind kind, int ch
         return;
 
     delayBankFor(kind)[channel].store(std::clamp(milliseconds, 0, MaxDelayMilliseconds), std::memory_order_release);
+    refreshDynamicBuffersForCurrentSampleRate();
 }
 
 int RealtimeEngine::getChannelDelayMilliseconds(CallbackStreamKind kind, int channel) const noexcept
@@ -405,45 +395,160 @@ bool RealtimeEngine::isChannelPluginGraphEnabled(CallbackStreamKind kind, int ch
     return pluginGraphBankFor(kind)[channel].load(std::memory_order_acquire);
 }
 
+void RealtimeEngine::setInputCallbackSuppressedChannel(int channel, bool shouldSuppress) noexcept
+{
+    if (channel < 0 || channel >= MaxChannels)
+        return;
+
+    inputCallbackSuppressed[channel].store(shouldSuppress, std::memory_order_release);
+}
+
 bool RealtimeEngine::prepareDelayBuffers(int requestedSampleRate) noexcept
 {
-    const int preparedSampleRate = std::clamp(requestedSampleRate, 8000, 192000);
-    const int requiredLength = ((preparedSampleRate * MaxDelayMilliseconds) / 1000) + 1;
-    const int requiredRouteLength = std::max(requiredLength, MaxPluginScratchSamples);
+    return rebuildDynamicBuffers(requestedSampleRate);
+}
 
-    if (delayBufferSampleRate.load(std::memory_order_acquire) == preparedSampleRate &&
-        delayBufferLength.load(std::memory_order_acquire) == requiredLength &&
-        routeBufferLength.load(std::memory_order_acquire) == requiredRouteLength &&
-        delayBuffer.size() == static_cast<size_t>(requiredLength) *
-            static_cast<size_t>(MaxChannels) *
-            static_cast<size_t>(DelayStreamCount) &&
-        routeBuffer.size() == static_cast<size_t>(requiredRouteLength) *
-            static_cast<size_t>(MaxDirectRoutes) *
-            static_cast<size_t>(DelayStreamCount))
+bool RealtimeEngine::rebuildDynamicBuffers(int requestedSampleRate) noexcept
+{
+    const int preparedSampleRate = std::clamp(requestedSampleRate, 8000, 192000);
+    const int requiredLength = static_cast<int>(
+        ((static_cast<int64_t>(preparedSampleRate) * MaxDelayMilliseconds) / 1000) + 1);
+
+    std::shared_ptr<DynamicAudioBuffers> next;
+    try
     {
+        next = std::make_shared<DynamicAudioBuffers>();
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    next->sampleRate = preparedSampleRate;
+
+    for (auto& indexes : next->delayLineIndexes)
+        indexes.fill(-1);
+    for (auto& indexes : next->routeLineIndexes)
+        indexes.fill(-1);
+
+    const auto addDelayLine = [&](int stream, int channel) noexcept {
+        if (stream < 0 || stream >= DelayStreamCount || channel < 0 || channel >= MaxChannels)
+            return;
+
+        next->delayLineIndexes[static_cast<size_t>(stream)][static_cast<size_t>(channel)] =
+            next->delayLineCount++;
+    };
+
+    for (int channel = 0; channel < MaxChannels; ++channel)
+    {
+        const bool inputDelayActive =
+            inputEnabled[static_cast<size_t>(channel)].load(std::memory_order_acquire) &&
+            inputDelayMilliseconds[static_cast<size_t>(channel)].load(std::memory_order_acquire) > 0;
+        if (inputDelayActive)
+        {
+            addDelayLine(0, channel);
+            addDelayLine(3, channel);
+        }
+
+        const bool outputDelayActive =
+            outputEnabled[static_cast<size_t>(channel)].load(std::memory_order_acquire) &&
+            outputDelayMilliseconds[static_cast<size_t>(channel)].load(std::memory_order_acquire) > 0;
+        if (outputDelayActive)
+        {
+            addDelayLine(1, channel);
+            addDelayLine(2, channel);
+        }
+    }
+
+    bool routeDelayActive = false;
+    const auto addRouteLine = [&](int stream, int route, bool needsDelayLine) noexcept {
+        if (stream < 0 || stream >= DelayStreamCount || route < 0 || route >= MaxDirectRoutes)
+            return;
+
+        next->routeLineIndexes[static_cast<size_t>(stream)][static_cast<size_t>(route)] =
+            next->routeLineCount++;
+        routeDelayActive = routeDelayActive || needsDelayLine;
+    };
+
+    const int inputRouteCount = std::clamp(inputDirectRoutes.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
+    for (int route = 0; route < inputRouteCount; ++route)
+    {
+        const int source = inputDirectRoutes.sourceChannels[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        const int destination = inputDirectRoutes.destinationChannels[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        if (source < 0 || source >= MaxChannels || destination < 0 || destination >= MaxChannels)
+            continue;
+
+        const int delayMs = inputDirectRoutes.delayMilliseconds[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        addRouteLine(0, route, delayMs > 0);
+    }
+
+    const int outputRouteCount = std::clamp(outputDirectRoutes.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
+    for (int route = 0; route < outputRouteCount; ++route)
+    {
+        const int source = outputDirectRoutes.sourceChannels[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        const int destination = outputDirectRoutes.destinationChannels[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        const int delayMs = outputDirectRoutes.delayMilliseconds[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        if (delayMs <= 0 || source < 0 || source >= MaxChannels || destination < 0 || destination >= MaxChannels)
+            continue;
+
+        addRouteLine(1, route, true);
+    }
+
+    const int mainRouteCount = std::clamp(mainDirectRoutes.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
+    for (int route = 0; route < mainRouteCount; ++route)
+    {
+        const int source = mainDirectRoutes.sourceChannels[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        const int destination = mainDirectRoutes.destinationChannels[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        const int delayMs = mainDirectRoutes.delayMilliseconds[static_cast<size_t>(route)].load(std::memory_order_acquire);
+        if (delayMs <= 0 || source < 0 || source >= MaxChannels || destination < 0 || destination >= MaxChannels)
+            continue;
+
+        addRouteLine(2, route, true);
+    }
+
+    next->delayLength = next->delayLineCount > 0 ? requiredLength : 0;
+    next->routeLength = next->routeLineCount > 0
+        ? (routeDelayActive ? std::max(requiredLength, MaxPluginScratchSamples) : MaxPluginScratchSamples)
+        : 0;
+
+    const auto current = dynamicBuffers.load(std::memory_order_acquire);
+    if (current != nullptr &&
+        current->sampleRate == next->sampleRate &&
+        current->delayLength == next->delayLength &&
+        current->routeLength == next->routeLength &&
+        current->delayLineCount == next->delayLineCount &&
+        current->routeLineCount == next->routeLineCount &&
+        current->delayLineIndexes == next->delayLineIndexes &&
+        current->routeLineIndexes == next->routeLineIndexes)
+    {
+        delayBufferSampleRate.store(preparedSampleRate, std::memory_order_release);
+        delayBufferLength.store(next->delayLength, std::memory_order_release);
+        routeBufferLength.store(next->routeLength, std::memory_order_release);
+        delayBufferLineCount.store(next->delayLineCount, std::memory_order_release);
+        routeBufferLineCount.store(next->routeLineCount, std::memory_order_release);
         return true;
     }
 
     try
     {
-        delayBuffer.assign(
-            static_cast<size_t>(requiredLength) *
-                static_cast<size_t>(MaxChannels) *
-                static_cast<size_t>(DelayStreamCount),
-            0.0f);
-        routeBuffer.assign(
-            static_cast<size_t>(requiredRouteLength) *
-                static_cast<size_t>(MaxDirectRoutes) *
-                static_cast<size_t>(DelayStreamCount),
-            0.0f);
+        if (next->delayLineCount > 0 && next->delayLength > 0)
+        {
+            next->delayBuffer.assign(
+                static_cast<size_t>(next->delayLineCount) *
+                    static_cast<size_t>(next->delayLength),
+                0.0f);
+        }
+
+        if (next->routeLineCount > 0 && next->routeLength > 0)
+        {
+            next->routeBuffer.assign(
+                static_cast<size_t>(next->routeLineCount) *
+                    static_cast<size_t>(next->routeLength),
+                0.0f);
+        }
     }
     catch (...)
     {
-        delayBuffer.clear();
-        routeBuffer.clear();
-        delayBufferLength.store(0, std::memory_order_release);
-        delayBufferSampleRate.store(0, std::memory_order_release);
-        routeBufferLength.store(0, std::memory_order_release);
         return false;
     }
 
@@ -475,10 +580,148 @@ bool RealtimeEngine::prepareDelayBuffers(int requestedSampleRate) noexcept
         routeCounts[route] = 0;
     }
 
-    delayBufferLength.store(requiredLength, std::memory_order_release);
+    dynamicBuffers.store(next, std::memory_order_release);
+    delayBufferLength.store(next->delayLength, std::memory_order_release);
     delayBufferSampleRate.store(preparedSampleRate, std::memory_order_release);
-    routeBufferLength.store(requiredRouteLength, std::memory_order_release);
+    routeBufferLength.store(next->routeLength, std::memory_order_release);
+    delayBufferLineCount.store(next->delayLineCount, std::memory_order_release);
+    routeBufferLineCount.store(next->routeLineCount, std::memory_order_release);
     return true;
+}
+
+void RealtimeEngine::refreshDynamicBuffersForCurrentSampleRate() noexcept
+{
+    int preparedSampleRate = delayBufferSampleRate.load(std::memory_order_acquire);
+    if (preparedSampleRate <= 0)
+        preparedSampleRate = sampleRate.load(std::memory_order_acquire);
+
+    if (preparedSampleRate > 0)
+        rebuildDynamicBuffers(preparedSampleRate);
+}
+
+bool RealtimeEngine::rebuildDynamicPluginScratchBuffers() noexcept
+{
+    std::shared_ptr<DynamicPluginScratchBuffers> next;
+    try
+    {
+        next = std::make_shared<DynamicPluginScratchBuffers>();
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    next->pluginBusLineIndexes.fill(-1);
+    next->passthroughRouteCapacities.fill(0);
+    next->passthroughRouteStartLines.fill(-1);
+
+    const auto markPluginBusLine = [&](int slot, int pin) noexcept {
+        if (slot < 0 || slot >= MaxPluginSlots || pin < 0 || pin >= MaxPluginPins)
+            return;
+
+        const auto index = pluginBusFlatIndex(slot, pin);
+        if (index >= next->pluginBusLineIndexes.size() ||
+            next->pluginBusLineIndexes[index] >= 0)
+        {
+            return;
+        }
+
+        next->pluginBusLineIndexes[index] = next->pluginBusLineCount++;
+    };
+
+    for (int slot = 0; slot < MaxPluginSlots; ++slot)
+    {
+        const auto& pluginSlot = pluginSlots[static_cast<size_t>(slot)];
+        const bool active =
+            pluginSlot.enabled.load(std::memory_order_acquire) &&
+            pluginSlot.processor.load(std::memory_order_acquire) != nullptr;
+        if (!active)
+            continue;
+
+        const int inputRouteCount = std::clamp(pluginSlot.inputRouteCount.load(std::memory_order_acquire), 0, MaxPluginRoutes);
+        for (int route = 0; route < inputRouteCount; ++route)
+        {
+            const int sourceKind = pluginSlot.inputSourceKinds[static_cast<size_t>(route)].load(std::memory_order_acquire);
+            if (sourceKind != static_cast<int>(PluginRouteEndpointKind::PluginPin))
+                continue;
+
+            const int sourceSlot = pluginSlot.inputSourceSlots[static_cast<size_t>(route)].load(std::memory_order_acquire);
+            const int sourcePin = pluginSlot.inputSourcePins[static_cast<size_t>(route)].load(std::memory_order_acquire);
+            markPluginBusLine(sourceSlot, sourcePin);
+        }
+
+        const int outputRouteCount = std::clamp(pluginSlot.outputRouteCount.load(std::memory_order_acquire), 0, MaxPluginRoutes);
+        for (int route = 0; route < outputRouteCount; ++route)
+        {
+            const int destinationKind = pluginSlot.outputDestinationKinds[static_cast<size_t>(route)].load(std::memory_order_acquire);
+            if (destinationKind != static_cast<int>(PluginRouteEndpointKind::PluginPin))
+                continue;
+
+            const int pin = pluginSlot.outputPluginPins[static_cast<size_t>(route)].load(std::memory_order_acquire);
+            markPluginBusLine(slot, pin);
+        }
+    }
+
+    const auto passthroughRouteCapacity = [](const DirectRouteBank& bank) noexcept {
+        return std::clamp(bank.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
+    };
+
+    next->passthroughRouteCapacities[0] = passthroughRouteCapacity(inputPluginPassthroughRoutes);
+    next->passthroughRouteCapacities[1] = passthroughRouteCapacity(outputPluginPassthroughRoutes);
+    next->passthroughRouteCapacities[2] = passthroughRouteCapacity(mainPluginPassthroughRoutes);
+    next->passthroughRouteCapacities[3] = next->passthroughRouteCapacities[0];
+
+    for (int stream = 0; stream < DelayStreamCount; ++stream)
+    {
+        const int capacity = next->passthroughRouteCapacities[static_cast<size_t>(stream)];
+        if (capacity <= 0)
+            continue;
+
+        next->passthroughRouteStartLines[static_cast<size_t>(stream)] = next->passthroughLineCount;
+        next->passthroughLineCount += capacity;
+    }
+
+    const auto current = dynamicPluginScratchBuffers.load(std::memory_order_acquire);
+    if (current != nullptr &&
+        current->pluginBusLineCount == next->pluginBusLineCount &&
+        current->passthroughLineCount == next->passthroughLineCount &&
+        current->pluginBusLineIndexes == next->pluginBusLineIndexes &&
+        current->passthroughRouteCapacities == next->passthroughRouteCapacities &&
+        current->passthroughRouteStartLines == next->passthroughRouteStartLines)
+    {
+        return true;
+    }
+
+    try
+    {
+        if (next->pluginBusLineCount > 0)
+        {
+            next->pluginBusBuffer.assign(
+                static_cast<size_t>(next->pluginBusLineCount) *
+                    static_cast<size_t>(MaxPluginScratchSamples),
+                0.0f);
+        }
+
+        if (next->passthroughLineCount > 0)
+        {
+            next->pluginPassthroughScratchBuffer.assign(
+                static_cast<size_t>(next->passthroughLineCount) *
+                    static_cast<size_t>(MaxPluginScratchSamples),
+                0.0f);
+        }
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    dynamicPluginScratchBuffers.store(next, std::memory_order_release);
+    return true;
+}
+
+void RealtimeEngine::refreshDynamicPluginScratchBuffers() noexcept
+{
+    rebuildDynamicPluginScratchBuffers();
 }
 
 int RealtimeEngine::getDelayBufferSampleRate() const noexcept
@@ -536,6 +779,7 @@ void RealtimeEngine::setDirectRoutes(CallbackStreamKind kind, const DirectAudioR
     }
 
     bank.routeCount.store(safeCount, std::memory_order_release);
+    refreshDynamicBuffersForCurrentSampleRate();
 }
 
 void RealtimeEngine::setPluginPassthroughRoutes(CallbackStreamKind kind, const DirectAudioRoute* routes, int routeCount) noexcept
@@ -549,6 +793,7 @@ void RealtimeEngine::setPluginPassthroughRoutes(CallbackStreamKind kind, const D
     }
 
     bank.routeCount.store(safeCount, std::memory_order_release);
+    refreshDynamicPluginScratchBuffers();
 }
 
 bool RealtimeEngine::startSinglePing(int inputChannel, int outputChannel, int timeoutMilliseconds) noexcept
@@ -619,6 +864,7 @@ void RealtimeEngine::setPluginSlot(
     target.bypassed.store(bypassed, std::memory_order_release);
     setPluginSlotRoutes(slot, inputRoutes, inputRouteCount, outputRoutes, outputRouteCount);
     target.enabled.store(processor != nullptr && enabled, std::memory_order_release);
+    refreshDynamicPluginScratchBuffers();
 }
 
 void RealtimeEngine::clearPluginSlot(int slot) noexcept
@@ -632,6 +878,7 @@ void RealtimeEngine::clearPluginSlot(int slot) noexcept
     target.bypassed.store(false, std::memory_order_release);
     target.inputRouteCount.store(0, std::memory_order_release);
     target.outputRouteCount.store(0, std::memory_order_release);
+    refreshDynamicPluginScratchBuffers();
 }
 
 void RealtimeEngine::setPluginSlotRoutes(
@@ -672,6 +919,7 @@ void RealtimeEngine::setPluginSlotRoutes(
     target.inputRouteCount.store(safeInputCount, std::memory_order_release);
     target.outputRouteCount.store(safeOutputCount, std::memory_order_release);
     target.enabled.store(wasEnabled, std::memory_order_release);
+    refreshDynamicPluginScratchBuffers();
 }
 
 void RealtimeEngine::setPluginSlotEnabled(int slot, bool shouldEnable) noexcept
@@ -681,6 +929,7 @@ void RealtimeEngine::setPluginSlotEnabled(int slot, bool shouldEnable) noexcept
 
     auto& target = pluginSlots[static_cast<size_t>(slot)];
     target.enabled.store(target.processor.load(std::memory_order_acquire) != nullptr && shouldEnable, std::memory_order_release);
+    refreshDynamicPluginScratchBuffers();
 }
 
 bool RealtimeEngine::isPluginSlotEnabled(int slot) const noexcept
@@ -752,14 +1001,15 @@ void RealtimeEngine::processInternal(
     outputChannels.store(buffer.outputChannels, std::memory_order_relaxed);
 
     const int readOffset = getReadOffset(buffer, kind);
+    const bool suppressInputCallbackChannels = kind == CallbackStreamKind::InputInsert && enableInputOutputRoutes;
     std::array<bool, MaxChannels> pluginOutputWritten {};
 
     captureProbeRead(buffer, kind, readOffset);
-    copyPassthrough(buffer, readOffset);
+    copyPassthrough(buffer, readOffset, suppressInputCallbackChannels);
     if (kind == CallbackStreamKind::InputInsert)
         processSinglePingInput(buffer);
 
-    applyConfiguredDelays(buffer, kind, readOffset, delayStream);
+    applyConfiguredDelays(buffer, kind, readOffset, delayStream, suppressInputCallbackChannels);
     const int sourceReadOffset = kind == CallbackStreamKind::Main ? 0 : readOffset;
     const bool pluginsProcessed = !pluginProcessingActive.exchange(true, std::memory_order_acquire);
     if (pluginsProcessed)
@@ -775,15 +1025,15 @@ void RealtimeEngine::processInternal(
         };
 
         PluginProcessingGuard guard { pluginProcessingActive };
-        applyPlugins(buffer, kind, sourceReadOffset, pluginOutputWritten);
+        applyPlugins(buffer, kind, sourceReadOffset, suppressInputCallbackChannels, pluginOutputWritten);
     }
 
-    applyPluginPassthroughRoutes(buffer, kind, sourceReadOffset, delayStream, pluginOutputWritten);
+    applyPluginPassthroughRoutes(buffer, kind, sourceReadOffset, delayStream, suppressInputCallbackChannels, pluginOutputWritten);
     if (pluginsProcessed)
-        applyPluginGraphGate(buffer, kind, pluginOutputWritten);
+        applyPluginGraphGate(buffer, kind, suppressInputCallbackChannels, pluginOutputWritten);
 
-    applyDirectRoutes(buffer, kind, sourceReadOffset, enableInputOutputRoutes, pluginOutputWritten);
-    applyConfiguredGains(buffer, kind, delayStream);
+    applyDirectRoutes(buffer, kind, sourceReadOffset, enableInputOutputRoutes, suppressInputCallbackChannels, pluginOutputWritten);
+    applyConfiguredGains(buffer, kind, delayStream, suppressInputCallbackChannels);
     if (kind == CallbackStreamKind::OutputInsert)
         processSinglePingOutput(buffer);
     captureProbeWrite(buffer, kind, readOffset);
@@ -952,7 +1202,18 @@ const RealtimeEngine::DirectRouteBank& RealtimeEngine::pluginPassthroughBankFor(
     return outputPluginPassthroughRoutes;
 }
 
-void RealtimeEngine::copyPassthrough(AudioBufferView buffer, int readOffset) noexcept
+bool RealtimeEngine::isInputCallbackSuppressed(bool suppressInputCallbackChannels, int channel) const noexcept
+{
+    return suppressInputCallbackChannels &&
+           channel >= 0 &&
+           channel < MaxChannels &&
+           inputCallbackSuppressed[static_cast<size_t>(channel)].load(std::memory_order_relaxed);
+}
+
+void RealtimeEngine::copyPassthrough(
+    AudioBufferView buffer,
+    int readOffset,
+    bool suppressInputCallbackChannels) noexcept
 {
     const int channels = std::max(0, std::min(buffer.outputChannels, buffer.inputChannels - readOffset));
 
@@ -961,7 +1222,17 @@ void RealtimeEngine::copyPassthrough(AudioBufferView buffer, int readOffset) noe
         const float* in = buffer.read[readOffset + ch];
         float* out = buffer.write[ch];
 
-        if (in == nullptr || out == nullptr)
+        if (out == nullptr)
+            continue;
+
+        if (isInputCallbackSuppressed(suppressInputCallbackChannels, ch))
+        {
+            for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
+                out[sample] = 0.0f;
+            continue;
+        }
+
+        if (in == nullptr)
             continue;
 
         for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
@@ -983,29 +1254,49 @@ void RealtimeEngine::applyConfiguredDelays(
     AudioBufferView buffer,
     CallbackStreamKind kind,
     int readOffset,
-    int streamIndex) noexcept
+    int streamIndex,
+    bool suppressInputCallbackChannels) noexcept
 {
-    const int length = delayBufferLength.load(std::memory_order_acquire);
-    const int preparedSampleRate = delayBufferSampleRate.load(std::memory_order_acquire);
-    if (length <= 1 || preparedSampleRate <= 0 || delayBuffer.empty())
+    const auto buffers = dynamicBuffers.load(std::memory_order_acquire);
+    if (buffers == nullptr ||
+        buffers->delayLength <= 1 ||
+        buffers->sampleRate <= 0 ||
+        buffers->delayBuffer.empty())
+    {
         return;
+    }
 
     const int channels = std::max(0, std::min(buffer.outputChannels, buffer.inputChannels - readOffset));
     const int safeChannels = std::min(channels, MaxChannels);
     const auto& delayBank = delayBankFor(kind);
     const auto& enabledBank = enableBankFor(kind);
     streamIndex = std::clamp(streamIndex, 0, DelayStreamCount - 1);
+    const int length = buffers->delayLength;
 
     for (int ch = 0; ch < safeChannels; ++ch)
     {
+        if (isInputCallbackSuppressed(suppressInputCallbackChannels, ch))
+            continue;
+
         float* out = buffer.write[ch];
         if (out == nullptr)
             continue;
 
         const int delayMs = delayBank[ch].load(std::memory_order_relaxed);
+        const bool enabled = enabledBank[ch].load(std::memory_order_relaxed);
+        if (!enabled || delayMs <= 0)
+            continue;
+
+        const int lineIndex = buffers->delayLineIndexes[static_cast<size_t>(streamIndex)][static_cast<size_t>(ch)];
+        if (lineIndex < 0 || lineIndex >= buffers->delayLineCount)
+            continue;
+
         const int targetDelaySamples = std::min(
             length - 1,
             static_cast<int>((static_cast<int64_t>(delayMs) * buffer.sampleRate) / 1000));
+        if (targetDelaySamples <= 0)
+            continue;
+
         auto& delayInitialized = smoothedDelayInitialized[static_cast<size_t>(streamIndex)][static_cast<size_t>(ch)];
         auto& smoothedDelay = smoothedDelaySamples[static_cast<size_t>(streamIndex)][static_cast<size_t>(ch)];
         if (!delayInitialized)
@@ -1022,12 +1313,12 @@ void RealtimeEngine::applyConfiguredDelays(
         }
         const int delaySamples = std::clamp(smoothedDelay, 0, length - 1);
 
-        const auto lineOffset =
-            ((static_cast<size_t>(streamIndex) * static_cast<size_t>(MaxChannels)) + static_cast<size_t>(ch)) *
-            static_cast<size_t>(length);
-        float* line = delayBuffer.data() + lineOffset;
+        const auto lineOffset = lineBufferOffset(lineIndex, length);
+        if (lineOffset + static_cast<size_t>(length) > buffers->delayBuffer.size())
+            continue;
+
+        float* line = buffers->delayBuffer.data() + lineOffset;
         int write = delayWritePositions[static_cast<size_t>(streamIndex)][static_cast<size_t>(ch)];
-        const bool enabled = enabledBank[ch].load(std::memory_order_relaxed);
 
         for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
         {
@@ -1038,8 +1329,7 @@ void RealtimeEngine::applyConfiguredDelays(
             if (read < 0)
                 read += length;
 
-            if (enabled && delaySamples > 0)
-                out[sample] = line[read];
+            out[sample] = line[read];
 
             ++write;
             if (write >= length)
@@ -1054,26 +1344,33 @@ void RealtimeEngine::applyPlugins(
     AudioBufferView buffer,
     CallbackStreamKind kind,
     int readOffset,
+    bool suppressInputCallbackChannels,
     std::array<bool, MaxChannels>& pluginOutputWritten) noexcept
 {
     std::array<bool, MaxPluginSlots * MaxPluginPins> pluginBusWritten {};
+    const auto scratchBuffers = dynamicPluginScratchBuffers.load(std::memory_order_acquire);
 
-    const auto pluginBusIndex = [](int slot, int pin) noexcept {
-        return static_cast<size_t>((slot * MaxPluginPins) + pin);
-    };
-
-    const auto pluginBusPointer = [this, &pluginBusIndex](int slot, int pin) noexcept -> float* {
+    const auto pluginBusPointer = [&scratchBuffers](int slot, int pin) noexcept -> float* {
         if (slot < 0 || slot >= MaxPluginSlots || pin < 0 || pin >= MaxPluginPins)
             return nullptr;
 
-        if (pluginBusBuffer.empty())
+        if (scratchBuffers == nullptr ||
+            scratchBuffers->pluginBusBuffer.empty())
             return nullptr;
 
-        const auto offset = pluginBusIndex(slot, pin) * static_cast<size_t>(MaxPluginScratchSamples);
-        if (offset >= pluginBusBuffer.size())
+        const auto index = pluginBusFlatIndex(slot, pin);
+        if (index >= scratchBuffers->pluginBusLineIndexes.size())
             return nullptr;
 
-        return pluginBusBuffer.data() + offset;
+        const int lineIndex = scratchBuffers->pluginBusLineIndexes[index];
+        if (lineIndex < 0 || lineIndex >= scratchBuffers->pluginBusLineCount)
+            return nullptr;
+
+        const auto offset = lineBufferOffset(lineIndex, MaxPluginScratchSamples);
+        if (offset + static_cast<size_t>(MaxPluginScratchSamples) > scratchBuffers->pluginBusBuffer.size())
+            return nullptr;
+
+        return scratchBuffers->pluginBusBuffer.data() + offset;
     };
 
     std::array<int, MaxPluginSlots> visitState {};
@@ -1149,10 +1446,14 @@ void RealtimeEngine::applyPlugins(
 
             if (sourceKind == static_cast<int>(PluginRouteEndpointKind::VoiceMeeterChannel))
             {
-                if (source >= 0 && source < MaxChannels)
+                if (source >= 0 &&
+                    source < MaxChannels &&
+                    !isInputCallbackSuppressed(suppressInputCallbackChannels, source))
+                {
                     sourcePointer = kind == CallbackStreamKind::Main
                         ? sourceChannelPointer(buffer, readOffset, source)
                         : currentChannelPointer(buffer, readOffset, source);
+                }
             }
             else if (sourceKind == static_cast<int>(PluginRouteEndpointKind::PluginPin) &&
                      sourceSlot >= 0 &&
@@ -1160,7 +1461,7 @@ void RealtimeEngine::applyPlugins(
                      sourcePin >= 0 &&
                      sourcePin < MaxPluginPins)
             {
-                const auto busIndex = pluginBusIndex(sourceSlot, sourcePin);
+                const auto busIndex = pluginBusFlatIndex(sourceSlot, sourcePin);
                 if (busIndex < pluginBusWritten.size() && pluginBusWritten[busIndex])
                     sourcePointer = pluginBusPointer(sourceSlot, sourcePin);
             }
@@ -1186,7 +1487,8 @@ void RealtimeEngine::applyPlugins(
             {
                 if (destination >= 0 &&
                     destination < buffer.outputChannels &&
-                    destination < MaxChannels)
+                    destination < MaxChannels &&
+                    !isInputCallbackSuppressed(suppressInputCallbackChannels, destination))
                 {
                     destinationPointer = buffer.write[destination];
                     resolvedDestinationChannel = destination;
@@ -1298,7 +1600,9 @@ void RealtimeEngine::applyPlugins(
                         outputRoute.destinationPin >= 0 &&
                         outputRoute.destinationPin < MaxPluginPins)
                     {
-                        pluginBusWritten[pluginBusIndex(outputRoute.destinationSlot, outputRoute.destinationPin)] = true;
+                        const auto busIndex = pluginBusFlatIndex(outputRoute.destinationSlot, outputRoute.destinationPin);
+                        if (busIndex < pluginBusWritten.size())
+                            pluginBusWritten[busIndex] = true;
                     }
                 }
             }
@@ -1316,12 +1620,13 @@ void RealtimeEngine::applyDirectRoutes(
     CallbackStreamKind kind,
     int readOffset,
     bool enableInputOutputRoutes,
+    bool suppressInputCallbackChannels,
     std::array<bool, MaxChannels>& pluginOutputWritten) noexcept
 {
     if (kind == CallbackStreamKind::InputInsert)
     {
         if (enableInputOutputRoutes)
-            captureInputRoutes(buffer, readOffset, pluginOutputWritten);
+            captureInputRoutes(buffer, readOffset, suppressInputCallbackChannels, pluginOutputWritten);
         return;
     }
 
@@ -1329,11 +1634,11 @@ void RealtimeEngine::applyDirectRoutes(
     {
         if (enableInputOutputRoutes)
             mixCapturedInputRoutes(buffer, pluginOutputWritten);
-        applySameBufferDirectRoutes(buffer, kind, readOffset, pluginOutputWritten);
+        applySameBufferDirectRoutes(buffer, kind, readOffset, suppressInputCallbackChannels, pluginOutputWritten);
         return;
     }
 
-    applySameBufferDirectRoutes(buffer, kind, readOffset, pluginOutputWritten);
+    applySameBufferDirectRoutes(buffer, kind, readOffset, suppressInputCallbackChannels, pluginOutputWritten);
 }
 
 void RealtimeEngine::applyPluginPassthroughRoutes(
@@ -1341,21 +1646,29 @@ void RealtimeEngine::applyPluginPassthroughRoutes(
     CallbackStreamKind kind,
     int readOffset,
     int streamIndex,
+    bool suppressInputCallbackChannels,
     std::array<bool, MaxChannels>& pluginOutputWritten) noexcept
 {
     const auto& routeBank = pluginPassthroughBankFor(kind);
     const int routeCount = std::clamp(routeBank.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
     streamIndex = std::clamp(streamIndex, 0, DelayStreamCount - 1);
+    const auto scratchBuffers = dynamicPluginScratchBuffers.load(std::memory_order_acquire);
     std::array<bool, MaxChannels> gatedPairs {};
     const bool gateSameBufferRoutes = kind != CallbackStreamKind::Main;
+    const int passthroughCapacity = scratchBuffers != nullptr
+        ? scratchBuffers->passthroughRouteCapacities[static_cast<size_t>(streamIndex)]
+        : 0;
+    const int passthroughStartLine = scratchBuffers != nullptr
+        ? scratchBuffers->passthroughRouteStartLines[static_cast<size_t>(streamIndex)]
+        : -1;
     const bool canSnapshotRoutes =
         gateSameBufferRoutes &&
         buffer.samplesPerFrame >= 0 &&
         buffer.samplesPerFrame <= MaxPluginScratchSamples &&
-        pluginPassthroughScratchBuffer.size() >=
-            static_cast<size_t>(DelayStreamCount) *
-                static_cast<size_t>(MaxDirectRoutes) *
-                static_cast<size_t>(MaxPluginScratchSamples);
+        scratchBuffers != nullptr &&
+        passthroughStartLine >= 0 &&
+        passthroughCapacity >= routeCount &&
+        !scratchBuffers->pluginPassthroughScratchBuffer.empty();
 
     std::array<int, MaxDirectRoutes> routeDestinations {};
     std::array<const float*, MaxDirectRoutes> routeInputs {};
@@ -1372,6 +1685,12 @@ void RealtimeEngine::applyPluginPassthroughRoutes(
         if (destination < 0 || destination >= buffer.outputChannels || destination >= MaxChannels)
             continue;
 
+        if (isInputCallbackSuppressed(suppressInputCallbackChannels, source) ||
+            isInputCallbackSuppressed(suppressInputCallbackChannels, destination))
+        {
+            continue;
+        }
+
         const float* input = sourceChannelPointer(buffer, readOffset, source);
         float* output = buffer.write[destination];
         if (input == nullptr || output == nullptr)
@@ -1387,12 +1706,21 @@ void RealtimeEngine::applyPluginPassthroughRoutes(
 
         if (canSnapshotRoutes)
         {
-            const auto snapshotOffset =
-                ((static_cast<size_t>(streamIndex) * static_cast<size_t>(MaxDirectRoutes)) +
-                    static_cast<size_t>(validRouteCount)) *
-                static_cast<size_t>(MaxPluginScratchSamples);
-            float* snapshot =
-                pluginPassthroughScratchBuffer.data() + snapshotOffset;
+            const int lineIndex = passthroughStartLine + validRouteCount;
+            const auto snapshotOffset = lineBufferOffset(lineIndex, MaxPluginScratchSamples);
+            float* snapshot = nullptr;
+            if (snapshotOffset + static_cast<size_t>(MaxPluginScratchSamples) <=
+                scratchBuffers->pluginPassthroughScratchBuffer.size())
+            {
+                snapshot = scratchBuffers->pluginPassthroughScratchBuffer.data() + snapshotOffset;
+            }
+
+            if (snapshot == nullptr)
+            {
+                routeInputs[static_cast<size_t>(validRouteCount)] = input;
+                ++validRouteCount;
+                continue;
+            }
 
             for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
                 snapshot[sample] = input[sample];
@@ -1541,17 +1869,23 @@ void RealtimeEngine::processSinglePingOutput(AudioBufferView buffer) noexcept
 void RealtimeEngine::captureInputRoutes(
     AudioBufferView buffer,
     int readOffset,
+    bool suppressInputCallbackChannels,
     std::array<bool, MaxChannels>& pluginOutputWritten) noexcept
 {
-    const int length = routeBufferLength.load(std::memory_order_acquire);
-    if (length <= 0 || routeBuffer.empty())
+    const auto buffers = dynamicBuffers.load(std::memory_order_acquire);
+    if (buffers == nullptr ||
+        buffers->routeLength <= 0 ||
+        buffers->routeBuffer.empty())
+    {
         return;
+    }
 
     const auto& routeBank = inputDirectRoutes;
     const int routeCount = std::clamp(routeBank.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
     if (routeCount <= 0)
         return;
 
+    const int length = buffers->routeLength;
     std::array<bool, MaxChannels> muteSources {};
 
     for (int route = 0; route < routeCount; ++route)
@@ -1560,8 +1894,15 @@ void RealtimeEngine::captureInputRoutes(
         if (source < 0 || source >= MaxChannels)
             continue;
 
+        if (isInputCallbackSuppressed(suppressInputCallbackChannels, source))
+            continue;
+
         const float* input = currentChannelPointer(buffer, readOffset, source);
         if (input == nullptr)
+            continue;
+
+        const int lineIndex = buffers->routeLineIndexes[0][static_cast<size_t>(route)];
+        if (lineIndex < 0 || lineIndex >= buffers->routeLineCount)
             continue;
 
         const int gainPercent = routeBank.gainPercent[static_cast<size_t>(route)].load(std::memory_order_relaxed);
@@ -1571,7 +1912,11 @@ void RealtimeEngine::captureInputRoutes(
             ? (targetGain - currentGain) / static_cast<float>(buffer.samplesPerFrame)
             : 0.0f;
         float gain = currentGain;
-        float* fifo = routeBuffer.data() + routeBufferOffset(0, route, length);
+        const auto lineOffset = lineBufferOffset(lineIndex, length);
+        if (lineOffset + static_cast<size_t>(length) > buffers->routeBuffer.size())
+            continue;
+
+        float* fifo = buffers->routeBuffer.data() + lineOffset;
 
         int write = routeWritePositions[0][static_cast<size_t>(route)].load(std::memory_order_relaxed);
         const int previouslyPrimed = routePrimedSamples[0][static_cast<size_t>(route)].load(std::memory_order_relaxed);
@@ -1616,15 +1961,20 @@ void RealtimeEngine::mixCapturedInputRoutes(
     AudioBufferView buffer,
     std::array<bool, MaxChannels>& pluginOutputWritten) noexcept
 {
-    const int length = routeBufferLength.load(std::memory_order_acquire);
-    if (length <= 0 || routeBuffer.empty())
+    const auto buffers = dynamicBuffers.load(std::memory_order_acquire);
+    if (buffers == nullptr ||
+        buffers->routeLength <= 0 ||
+        buffers->routeBuffer.empty())
+    {
         return;
+    }
 
     const auto& routeBank = inputDirectRoutes;
     const int routeCount = std::clamp(routeBank.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
     if (routeCount <= 0)
         return;
 
+    const int length = buffers->routeLength;
     for (int route = 0; route < routeCount; ++route)
     {
         const int destination = routeBank.destinationChannels[static_cast<size_t>(route)].load(std::memory_order_relaxed);
@@ -1633,6 +1983,10 @@ void RealtimeEngine::mixCapturedInputRoutes(
 
         float* output = buffer.write[destination];
         if (output == nullptr)
+            continue;
+
+        const int lineIndex = buffers->routeLineIndexes[0][static_cast<size_t>(route)];
+        if (lineIndex < 0 || lineIndex >= buffers->routeLineCount)
             continue;
 
         const int delayMs = routeBank.delayMilliseconds[static_cast<size_t>(route)].load(std::memory_order_relaxed);
@@ -1644,7 +1998,11 @@ void RealtimeEngine::mixCapturedInputRoutes(
         if (primedSamples < delaySamples + buffer.samplesPerFrame)
             continue;
 
-        float* fifo = routeBuffer.data() + routeBufferOffset(0, route, length);
+        const auto lineOffset = lineBufferOffset(lineIndex, length);
+        if (lineOffset + static_cast<size_t>(length) > buffers->routeBuffer.size())
+            continue;
+
+        float* fifo = buffers->routeBuffer.data() + lineOffset;
         const int write = routeWritePositions[0][static_cast<size_t>(route)].load(std::memory_order_acquire);
         int read = write - delaySamples - buffer.samplesPerFrame;
         while (read < 0)
@@ -1668,12 +2026,13 @@ void RealtimeEngine::applySameBufferDirectRoutes(
     AudioBufferView buffer,
     CallbackStreamKind kind,
     int readOffset,
+    bool suppressInputCallbackChannels,
     std::array<bool, MaxChannels>& pluginOutputWritten) noexcept
 {
     const auto& routeBank = directRouteBankFor(kind);
     const int routeCount = std::clamp(routeBank.routeCount.load(std::memory_order_acquire), 0, MaxDirectRoutes);
     const int streamIndex = delayStreamIndex(kind);
-    const int length = routeBufferLength.load(std::memory_order_acquire);
+    const auto buffers = dynamicBuffers.load(std::memory_order_acquire);
 
     for (int route = 0; route < routeCount; ++route)
     {
@@ -1685,6 +2044,12 @@ void RealtimeEngine::applySameBufferDirectRoutes(
 
         if (destination < 0 || destination >= buffer.outputChannels || destination >= MaxChannels)
             continue;
+
+        if (isInputCallbackSuppressed(suppressInputCallbackChannels, source) ||
+            isInputCallbackSuppressed(suppressInputCallbackChannels, destination))
+        {
+            continue;
+        }
 
         const float* input = kind == CallbackStreamKind::Main
             ? sourceChannelPointer(buffer, readOffset, source)
@@ -1702,15 +2067,59 @@ void RealtimeEngine::applySameBufferDirectRoutes(
         float gain = currentGain;
 
         const int delayMs = routeBank.delayMilliseconds[static_cast<size_t>(route)].load(std::memory_order_relaxed);
-        const int delaySamples = std::clamp(
-            buffer.sampleRate > 0 ? static_cast<int>((static_cast<int64_t>(delayMs) * buffer.sampleRate) / 1000) : 0,
-            0,
-            std::max(0, length - 1));
-        const bool useDelay = delaySamples > 0 && length > 1 && !routeBuffer.empty();
+        const bool delayRequested = delayMs > 0;
+        int length = 0;
+        int delaySamples = 0;
+        int lineIndex = -1;
+        if (delayRequested && buffers != nullptr)
+        {
+            length = buffers->routeLength;
+            lineIndex = buffers->routeLineIndexes[static_cast<size_t>(streamIndex)][static_cast<size_t>(route)];
+            delaySamples = std::clamp(
+                buffer.sampleRate > 0 ? static_cast<int>((static_cast<int64_t>(delayMs) * buffer.sampleRate) / 1000) : 0,
+                0,
+                std::max(0, length - 1));
+        }
+
+        const bool useDelay =
+            delaySamples > 0 &&
+            length > 1 &&
+            buffers != nullptr &&
+            lineIndex >= 0 &&
+            lineIndex < buffers->routeLineCount &&
+            !buffers->routeBuffer.empty();
+
+        if (delayRequested && !useDelay)
+        {
+            currentGain = targetGain;
+            if (kind != CallbackStreamKind::Main)
+            {
+                for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
+                    output[sample] = 0.0f;
+
+                if (routeBank.muteSource[static_cast<size_t>(route)].load(std::memory_order_relaxed) &&
+                    source < buffer.outputChannels)
+                {
+                    float* sourceOutput = buffer.write[source];
+                    if (sourceOutput != nullptr)
+                    {
+                        for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
+                            sourceOutput[sample] = 0.0f;
+                    }
+                }
+            }
+
+            pluginOutputWritten[static_cast<size_t>(destination)] = true;
+            continue;
+        }
 
         if (useDelay)
         {
-            float* fifo = routeBuffer.data() + routeBufferOffset(streamIndex, route, length);
+            const auto lineOffset = lineBufferOffset(lineIndex, length);
+            if (lineOffset + static_cast<size_t>(length) > buffers->routeBuffer.size())
+                continue;
+
+            float* fifo = buffers->routeBuffer.data() + lineOffset;
             int write = routeWritePositions[static_cast<size_t>(streamIndex)][static_cast<size_t>(route)].load(std::memory_order_relaxed);
             const int previouslyPrimed = routePrimedSamples[static_cast<size_t>(streamIndex)][static_cast<size_t>(route)].load(std::memory_order_relaxed);
             for (int sample = 0; sample < buffer.samplesPerFrame; ++sample)
@@ -1822,6 +2231,7 @@ void RealtimeEngine::applySameBufferDirectRoutes(
 void RealtimeEngine::applyPluginGraphGate(
     AudioBufferView buffer,
     CallbackStreamKind kind,
+    bool suppressInputCallbackChannels,
     const std::array<bool, MaxChannels>& pluginOutputWritten) noexcept
 {
     const int channels = std::max(0, std::min(buffer.outputChannels, MaxChannels));
@@ -1829,6 +2239,9 @@ void RealtimeEngine::applyPluginGraphGate(
 
     for (int ch = 0; ch < channels; ++ch)
     {
+        if (isInputCallbackSuppressed(suppressInputCallbackChannels, ch))
+            continue;
+
         if (!graphBank[static_cast<size_t>(ch)].load(std::memory_order_relaxed))
             continue;
 
@@ -1844,7 +2257,11 @@ void RealtimeEngine::applyPluginGraphGate(
     }
 }
 
-void RealtimeEngine::applyConfiguredGains(AudioBufferView buffer, CallbackStreamKind kind, int streamIndex) noexcept
+void RealtimeEngine::applyConfiguredGains(
+    AudioBufferView buffer,
+    CallbackStreamKind kind,
+    int streamIndex,
+    bool suppressInputCallbackChannels) noexcept
 {
     const int channels = std::max(0, std::min(buffer.outputChannels, buffer.inputChannels - getReadOffset(buffer, kind)));
     const int safeChannels = std::min(channels, MaxChannels);
@@ -1854,6 +2271,9 @@ void RealtimeEngine::applyConfiguredGains(AudioBufferView buffer, CallbackStream
 
     for (int ch = 0; ch < safeChannels; ++ch)
     {
+        if (isInputCallbackSuppressed(suppressInputCallbackChannels, ch))
+            continue;
+
         if (!enabledBank[ch].load(std::memory_order_relaxed))
         {
             smoothedChannelGains[static_cast<size_t>(streamIndex)][static_cast<size_t>(ch)] = 1.0f;

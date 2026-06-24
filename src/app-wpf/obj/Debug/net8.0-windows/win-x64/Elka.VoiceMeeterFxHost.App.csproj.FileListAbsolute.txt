@@ -39,3 +39,8 @@ C:\Users\torme\Documents\Codex\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App
 C:\Users\torme\Documents\Codex\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App.runtimeconfig.json
 C:\Users\torme\Documents\Codex\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App.dll
 C:\Users\torme\Documents\Codex\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App.pdb
+C:\Users\torme\Documents\Codex\2026-06-06\okay-so-this-chat-will-be\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App.exe
+C:\Users\torme\Documents\Codex\2026-06-06\okay-so-this-chat-will-be\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App.deps.json
+C:\Users\torme\Documents\Codex\2026-06-06\okay-so-this-chat-will-be\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App.runtimeconfig.json
+C:\Users\torme\Documents\Codex\2026-06-06\okay-so-this-chat-will-be\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App.dll
+C:\Users\torme\Documents\Codex\2026-06-06\okay-so-this-chat-will-be\build-check\ElkaFxHost\Elka.VoiceMeeterFxHost.App.pdb

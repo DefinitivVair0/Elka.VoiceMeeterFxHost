@@ -72,6 +72,13 @@ public partial class MainWindow : Window
     private bool _pluginNodeLoadInProgress;
     private string _pluginNodeLoadName = string.Empty;
     private DateTimeOffset _pluginNodeLoadStartedAt;
+    private bool _realtimeCallbackMonitorInitialized;
+    private ulong _lastRealtimeCallbackBufferCount;
+    private int _lastRealtimeCallbackSampleRate;
+    private int _lastRealtimeCallbackBlockSize;
+    private DateTimeOffset _lastRealtimeCallbackActivityAt;
+    private DateTimeOffset _lastRealtimeFormatChangeAt;
+    private DateTimeOffset _lastRealtimeCallbackRearmAt;
 
     private const int DefaultVbanControlPort = 6981;
     private const string DefaultVbanControlStreamName = "Command1";
@@ -98,6 +105,9 @@ public partial class MainWindow : Window
     private const int CollapsedVisiblePinCount = 2;
     private const int MaxSavedPluginRestoreAttempts = 80;
     private const double DragPreviewXCorrection = 6.0;
+    private static readonly TimeSpan RealtimeCallbackStaleThreshold = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RealtimeCallbackFormatSettleTime = TimeSpan.FromSeconds(1.25);
+    private static readonly TimeSpan RealtimeCallbackRearmCooldown = TimeSpan.FromSeconds(5);
     private static readonly RouteHueChoice[] RouteHueChoices =
     [
         new("Blue", "blue", "#4AA3FF", "#10243A"),
@@ -572,21 +582,34 @@ public partial class MainWindow : Window
 
     private void ApplyInsertAsioPatchSelection()
     {
-        if (!_engine.IsInsertAsioRunning)
-        {
-            return;
-        }
-
+        var insertAsioRunning = _engine.IsInsertAsioRunning;
         foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
         {
-            var armed = IsEndpointArmedForInsertAsio(endpoint);
+            var armed = insertAsioRunning && IsEndpointArmedForInsertAsio(endpoint);
             for (var channel = endpoint.Range.Start; channel <= endpoint.Range.End; channel++)
             {
-                _engine.SetPatchInsertEnabled(channel, armed);
+                _engine.SetInputCallbackSuppressedChannel(channel, armed);
+                if (insertAsioRunning)
+                {
+                    _engine.SetPatchInsertEnabled(channel, armed);
+                }
             }
         }
 
         _engine.RefreshVoicemeeterParameters();
+    }
+
+    private void SyncInputCallbackSuppression()
+    {
+        var insertAsioRunning = _engine.IsInsertAsioRunning;
+        foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
+        {
+            var armed = insertAsioRunning && IsEndpointArmedForInsertAsio(endpoint);
+            for (var channel = endpoint.Range.Start; channel <= endpoint.Range.End; channel++)
+            {
+                _engine.SetInputCallbackSuppressedChannel(channel, armed);
+            }
+        }
     }
 
     private void RefreshAfterInsertAsioStateChange()
@@ -1540,6 +1563,7 @@ public partial class MainWindow : Window
         StatusTextBlock.Text = _engine.StatusText;
         InsertAsioStatusTextBlock.Text = _engine.InsertAsioStatus();
         MaybeRestartInsertAsioAfterFormatChange();
+        MonitorRealtimeCallback();
         var probeText = _engine.ProbeText;
         var patchExplanation = string.Empty;
         var selectedPatchBypassed = _selectedChannelSettings is not null &&
@@ -1583,6 +1607,95 @@ public partial class MainWindow : Window
         }
 
         ProbeStatusTextBlock.Text = probeText;
+    }
+
+    private void MonitorRealtimeCallback()
+    {
+        var snapshot = _engine.CallbackSnapshot;
+        var now = DateTimeOffset.Now;
+        if (!snapshot.Attached)
+        {
+            _realtimeCallbackMonitorInitialized = false;
+            return;
+        }
+
+        if (snapshot.ConnectionState != 3)
+        {
+            _realtimeCallbackMonitorInitialized = false;
+            if (HasRealtimeCallbackWork() &&
+                now - _lastRealtimeCallbackRearmAt >= RealtimeCallbackRearmCooldown)
+            {
+                _lastRealtimeCallbackRearmAt = now;
+                var rearmStatus = _engine.RearmRequestedMode();
+                AppendLog($"Realtime callback re-armed after callback state drop: {rearmStatus}");
+            }
+
+            return;
+        }
+
+        if (snapshot.SampleRate <= 0 || snapshot.BlockSize <= 0)
+        {
+            _realtimeCallbackMonitorInitialized = false;
+            return;
+        }
+
+        var bufferCount = snapshot.BufferInCount + snapshot.BufferOutCount + snapshot.BufferMainCount;
+        if (!_realtimeCallbackMonitorInitialized)
+        {
+            _realtimeCallbackMonitorInitialized = true;
+            _lastRealtimeCallbackBufferCount = bufferCount;
+            _lastRealtimeCallbackSampleRate = snapshot.SampleRate;
+            _lastRealtimeCallbackBlockSize = snapshot.BlockSize;
+            _lastRealtimeCallbackActivityAt = now;
+            _lastRealtimeFormatChangeAt = now;
+            return;
+        }
+
+        if (snapshot.SampleRate != _lastRealtimeCallbackSampleRate ||
+            snapshot.BlockSize != _lastRealtimeCallbackBlockSize)
+        {
+            _lastRealtimeCallbackSampleRate = snapshot.SampleRate;
+            _lastRealtimeCallbackBlockSize = snapshot.BlockSize;
+            _lastRealtimeCallbackBufferCount = bufferCount;
+            _lastRealtimeCallbackActivityAt = now;
+            _lastRealtimeFormatChangeAt = now;
+            return;
+        }
+
+        if (bufferCount != _lastRealtimeCallbackBufferCount)
+        {
+            _lastRealtimeCallbackBufferCount = bufferCount;
+            _lastRealtimeCallbackActivityAt = now;
+            return;
+        }
+
+        if (!HasRealtimeCallbackWork())
+        {
+            return;
+        }
+
+        var staleFor = now - _lastRealtimeCallbackActivityAt;
+        var stableFor = now - _lastRealtimeFormatChangeAt;
+        var cooldownFor = now - _lastRealtimeCallbackRearmAt;
+        if (staleFor < RealtimeCallbackStaleThreshold ||
+            stableFor < RealtimeCallbackFormatSettleTime ||
+            cooldownFor < RealtimeCallbackRearmCooldown)
+        {
+            return;
+        }
+
+        _lastRealtimeCallbackRearmAt = now;
+        _realtimeCallbackMonitorInitialized = false;
+        var status = _engine.RearmRequestedMode();
+        AppendLog($"Realtime callback re-armed after stale buffers ({snapshot.SampleRate} Hz / {snapshot.BlockSize} spl): {status}");
+    }
+
+    private bool HasRealtimeCallbackWork()
+    {
+        return _settings.PluginNodes.Count > 0 ||
+               _settings.CanvasConnections.Count > 0 ||
+               _settingsByEndpoint.Values.Any(static settings => settings.HasActiveChannels) ||
+               AllDirectRoutes().Any();
     }
 
     private void MaybeRestartInsertAsioAfterFormatChange()
@@ -1771,6 +1884,7 @@ public partial class MainWindow : Window
         builder.AppendLine($"Computed callback mode: {ComputeActiveCallbackMode()}");
         builder.AppendLine($"Engine requested mode: {_engine.RequestedMode}");
         builder.AppendLine($"Engine status: {_engine.StatusText}");
+        builder.AppendLine($"Callback debug: {_engine.CallbackDebugText}");
         builder.AppendLine($"Probe: {_engine.ProbeText}");
         if (_engine.SelectedStripSignalStatus is { Length: > 0 } signalStatus)
         {
@@ -2007,6 +2121,7 @@ public partial class MainWindow : Window
 
     private void RefreshEngineCallbackMode()
     {
+        SyncInputCallbackSuppression();
         ApplyVstCanvasPassthroughRoutes();
         _engine.SetRequestedMode(ComputeActiveCallbackMode());
     }
@@ -2102,62 +2217,7 @@ public partial class MainWindow : Window
     private bool IsInputPatchBypassEndpoint(CallbackMode mode, IoEndpoint endpoint, out string explanation)
     {
         explanation = string.Empty;
-        if (mode != CallbackMode.Input)
-        {
-            return false;
-        }
-
-        var asioPatches = new List<string>();
-        var insertChannels = new List<int>();
-        for (var channel = endpoint.Range.Start; channel <= endpoint.Range.End; channel++)
-        {
-            var asioChannel = _engine.GetPatchAsioChannel(channel);
-            if (asioChannel > 0)
-            {
-                asioPatches.Add($"CH {channel + 1}->ASIO {asioChannel}");
-            }
-
-            if (_engine.GetPatchInsertEnabled(channel) > 0)
-            {
-                insertChannels.Add(channel + 1);
-            }
-        }
-
-        if (asioPatches.Count == 0 && insertChannels.Count == 0)
-        {
-            return false;
-        }
-
-        var armedForInsertAsio = _engine.IsInsertAsioRunning && IsEndpointArmedForInsertAsio(endpoint);
-        if (armedForInsertAsio)
-        {
-            return false;
-        }
-
-        var parts = new List<string>();
-        if (asioPatches.Count > 0)
-        {
-            parts.Add($"ASIO patch {string.Join(", ", asioPatches)}");
-        }
-
-        if (insertChannels.Count > 0)
-        {
-            var postFx = _engine.GetPatchPostFxInsertEnabled() switch
-            {
-                0 => "pre-FX",
-                1 => "post-FX",
-                _ => "unknown insert point"
-            };
-            parts.Add($"Virtual ASIO insert on CH {string.Join("/", insertChannels)} ({postFx})");
-        }
-
-        var nextStep = _engine.IsInsertAsioRunning
-            ? "Tick this input in the ASIO Patch card to let Elka own its Patch.insert channels, or use Output/Bus FX."
-            : "Start ASIO Patch and tick this input to process it here, or use the Output/Bus canvas for this source.";
-        explanation =
-            $"{endpoint.DisplayName}: Input FX is unavailable because VoiceMeeter reports {string.Join("; ", parts)}. " +
-            nextStep;
-        return true;
+        return false;
     }
 
     private bool IsInputPatchBypassChannel(CallbackMode mode, int channel, out string explanation)
@@ -2178,6 +2238,7 @@ public partial class MainWindow : Window
         UpdateProbeSelection(endpointMode, endpoint);
         RefreshEndpointButtonSelection();
         BuildChannelStrips();
+        RefreshEngineCallbackMode();
         RebuildRoutingCanvas();
         QueueSave();
     }
@@ -2405,6 +2466,7 @@ public partial class MainWindow : Window
         }
 
         AppendLog($"{endpoint.DisplayName}: VST canvas pins set to {EndpointPinModeLabel(mode, endpoint)}.");
+        RefreshEngineCallbackMode();
         RebuildRoutingCanvas();
         QueueSave();
     }
@@ -4034,6 +4096,7 @@ public partial class MainWindow : Window
         ApplyEngineState();
         RefreshEndpointButtonSelection();
         BuildChannelStrips();
+        RefreshEngineCallbackMode();
         RebuildRoutingCanvas();
         QueueSave();
     }

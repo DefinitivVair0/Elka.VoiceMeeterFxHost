@@ -54,6 +54,16 @@ internal sealed record IoEndpoint(string Name, ChannelRange Range)
     public override string ToString() => DisplayName;
 }
 
+internal readonly record struct RealtimeCallbackSnapshot(
+    bool Attached,
+    int ConnectionState,
+    int SampleRate,
+    int BlockSize,
+    ulong BufferInCount,
+    ulong BufferOutCount,
+    ulong BufferMainCount,
+    ulong CommandCount);
+
 internal enum EndpointPinMode
 {
     Stereo = 0,
@@ -488,6 +498,7 @@ internal static class FxHostSettingsStore
 internal sealed class NativeEngineClient : IDisposable
 {
     private const string DllName = "ElkaVoiceMeeterFxHost.Native.dll";
+    private const int NativeConnectionRunning = 3;
     private bool _attached;
     private bool _disposed;
     private string _lastStatus = "Native engine bridge not loaded";
@@ -548,6 +559,44 @@ internal sealed class NativeEngineClient : IDisposable
             var rate = stats.SampleRate > 0 ? $"{stats.SampleRate} Hz" : "no audio yet";
             var block = stats.BlockSize > 0 ? $"{stats.BlockSize} spl" : "block --";
             return $"{state} | {rate} | {block} | CPU {stats.CallbackCpuPercent:0.0}% | peak {stats.PeakProcessUsec:0} us";
+        }
+    }
+
+    public string CallbackDebugText
+    {
+        get
+        {
+            if (!_attached)
+            {
+                return "native bridge not attached";
+            }
+
+            var stats = GetStats();
+            return $"commands={stats.CallbackCommandCount}, start={stats.CallbackStartingCount}, end={stats.CallbackEndingCount}, " +
+                   $"change={stats.CallbackChangeCount}, in={stats.CallbackBufferInCount}, out={stats.CallbackBufferOutCount}, " +
+                   $"main={stats.CallbackBufferMainCount}, last={stats.CallbackLastCommand}";
+        }
+    }
+
+    public RealtimeCallbackSnapshot CallbackSnapshot
+    {
+        get
+        {
+            if (!_attached)
+            {
+                return new RealtimeCallbackSnapshot(false, 0, 0, 0, 0, 0, 0, 0);
+            }
+
+            var stats = GetStats();
+            return new RealtimeCallbackSnapshot(
+                true,
+                stats.ConnectionState,
+                stats.SampleRate,
+                stats.BlockSize,
+                stats.CallbackBufferInCount,
+                stats.CallbackBufferOutCount,
+                stats.CallbackBufferMainCount,
+                stats.CallbackCommandCount);
         }
     }
 
@@ -761,6 +810,17 @@ internal sealed class NativeEngineClient : IDisposable
 
     public CallbackMode RequestedMode => _requestedMode;
 
+    public string RearmRequestedMode()
+    {
+        if (!_attached)
+        {
+            return _lastStatus;
+        }
+
+        SetMode(_requestedMode, force: true);
+        return _lastStatus;
+    }
+
     public void SetProbeChannels(int inputChannel, int outputChannel)
     {
         if (!_attached)
@@ -786,6 +846,35 @@ internal sealed class NativeEngineClient : IDisposable
         {
             _lastStatus = $"VoiceMeeter parameter refresh failed: {ex.Message}";
             return false;
+        }
+    }
+
+    public int EnsureRealtimePrepared(out string statusText)
+    {
+        statusText = string.Empty;
+        if (!_attached)
+        {
+            statusText = _lastStatus;
+            return -1;
+        }
+
+        try
+        {
+            var status = new StringBuilder(1024);
+            var result = ElkaFx_EnsureRealtimePrepared(status, status.Capacity);
+            statusText = status.ToString();
+            if (result != 0 && statusText.Length > 0)
+            {
+                _lastStatus = statusText;
+            }
+
+            return result;
+        }
+        catch (SEHException ex)
+        {
+            statusText = $"Realtime prepare failed: {ex.Message}";
+            _lastStatus = statusText;
+            return -1;
         }
     }
 
@@ -977,6 +1066,16 @@ internal sealed class NativeEngineClient : IDisposable
         {
             ElkaFx_SetChannelSettings((int)mode, endpoint.Range.Start + offset, 0, 0, 100);
         }
+    }
+
+    public void SetInputCallbackSuppressedChannel(int channel, bool suppressed)
+    {
+        if (!_attached)
+        {
+            return;
+        }
+
+        ElkaFx_SetInputCallbackSuppressedChannel(Math.Max(0, channel), suppressed ? 1 : 0);
     }
 
     public void ApplyRoutes(IEnumerable<DirectRouteSummary> routes)
@@ -1377,14 +1476,15 @@ internal sealed class NativeEngineClient : IDisposable
         _disposed = true;
     }
 
-    private void SetMode(CallbackMode mode)
+    private void SetMode(CallbackMode mode, bool force = false)
     {
         if (!_attached)
         {
             return;
         }
 
-        if (mode == _appliedMode)
+        var stats = GetStats();
+        if (!force && mode == _appliedMode && stats.ConnectionState == NativeConnectionRunning)
         {
             return;
         }
@@ -1436,6 +1536,14 @@ internal sealed class NativeEngineClient : IDisposable
         public int InputChannels;
         public int OutputChannels;
         public ulong CallbackCount;
+        public ulong CallbackCommandCount;
+        public ulong CallbackStartingCount;
+        public ulong CallbackEndingCount;
+        public ulong CallbackChangeCount;
+        public ulong CallbackBufferInCount;
+        public ulong CallbackBufferOutCount;
+        public ulong CallbackBufferMainCount;
+        public int CallbackLastCommand;
         public double LastProcessUsec;
         public double PeakProcessUsec;
         public double CallbackCpuPercent;
@@ -1489,6 +1597,12 @@ internal sealed class NativeEngineClient : IDisposable
     [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ElkaFx_SetMode(int mode, StringBuilder status, int statusChars);
 
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_Start(StringBuilder status, int statusChars);
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ElkaFx_EnsureRealtimePrepared(StringBuilder status, int statusChars);
+
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern void ElkaFx_SetTargetRange(int kind, int startChannel, int channelCount);
 
@@ -1499,6 +1613,9 @@ internal sealed class NativeEngineClient : IDisposable
         int enabled,
         int delayMilliseconds,
         int gainPercent);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void ElkaFx_SetInputCallbackSuppressedChannel(int channel, int suppressed);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern void ElkaFx_SetDirectRoutes(

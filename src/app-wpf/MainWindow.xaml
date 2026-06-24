@@ -4,7 +4,7 @@
         Title="Elka VoiceMeeter FX Host"
         Icon="Assets/VoicemeeterDelay.ico"
         Width="1600"
-        Height="951"
+        Height="831"
         MinWidth="1180"
         MinHeight="760"
         WindowStartupLocation="CenterScreen">

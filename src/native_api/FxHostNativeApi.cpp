@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <propsys.h>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -54,6 +55,14 @@ struct NativeStats
     int inputChannels = 0;
     int outputChannels = 0;
     unsigned long long callbackCount = 0;
+    unsigned long long callbackCommandCount = 0;
+    unsigned long long callbackStartingCount = 0;
+    unsigned long long callbackEndingCount = 0;
+    unsigned long long callbackChangeCount = 0;
+    unsigned long long callbackBufferInCount = 0;
+    unsigned long long callbackBufferOutCount = 0;
+    unsigned long long callbackBufferMainCount = 0;
+    int callbackLastCommand = 0;
     double lastProcessUsec = 0.0;
     double peakProcessUsec = 0.0;
     double callbackCpuPercent = 0.0;
@@ -988,12 +997,13 @@ int activeVoiceMeeterSampleRate(NativeHost& target) noexcept
 
 int desiredInsertAsioSampleRate(NativeHost& target) noexcept
 {
+    const int configuredSampleRate = configuredVoiceMeeterSampleRate(target);
+    if (configuredSampleRate > 0)
+        return configuredSampleRate;
+
     const auto stats = target.engine.getStats();
     const int liveSampleRate = clampVoiceMeeterSampleRate(stats.sampleRate);
-    if (liveSampleRate > 0)
-        return liveSampleRate;
-
-    return configuredVoiceMeeterSampleRate(target);
+    return liveSampleRate;
 }
 
 int desiredInsertAsioBlockSize(NativeHost& target) noexcept
@@ -1027,15 +1037,81 @@ bool startLocked(NativeHost& target, std::wstring& error)
 
     const int activeSampleRate = activeVoiceMeeterSampleRate(target);
     if (activeSampleRate > 0 &&
-        target.engine.getDelayBufferSampleRate() != activeSampleRate &&
-        !target.engine.prepareDelayBuffers(activeSampleRate))
+        target.engine.getDelayBufferSampleRate() != activeSampleRate)
     {
-        error = L"Failed to allocate delay buffers for " + std::to_wstring(activeSampleRate) + L" Hz";
-        return false;
+        target.client.stop();
+        if (!target.engine.prepareDelayBuffers(activeSampleRate))
+        {
+            error = L"Failed to allocate delay buffers for " + std::to_wstring(activeSampleRate) + L" Hz";
+            return false;
+        }
+
+        if (!target.client.start(error))
+            return false;
     }
 
     target.lastStatus = target.client.statusText();
     return true;
+}
+
+int ensureRealtimePreparedLocked(NativeHost& target, std::wstring& message)
+{
+    std::wstring connectError;
+    if (!target.client.connect(connectError))
+    {
+        message = connectError.empty() ? L"Could not connect to VoiceMeeter Remote API." : connectError;
+        return -1;
+    }
+
+    const auto stats = target.engine.getStats();
+    const int desiredSampleRate = clampVoiceMeeterSampleRate(stats.sampleRate);
+    if (desiredSampleRate <= 0)
+    {
+        message = L"Realtime prepare skipped: callback has not reported a live sample rate yet.";
+        return 0;
+    }
+
+    if (target.engine.getDelayBufferSampleRate() == desiredSampleRate)
+    {
+        message = L"Realtime buffers are current.";
+        return 0;
+    }
+
+    const bool wasRunning = target.client.state() == ConnectionState::Running;
+    if (wasRunning)
+        target.client.stop();
+
+    if (!target.engine.prepareDelayBuffers(desiredSampleRate))
+    {
+        if (wasRunning)
+        {
+            std::wstring restartError;
+            target.client.start(restartError);
+        }
+
+        message = L"Realtime prepare failed: could not allocate delay buffers for " +
+            std::to_wstring(desiredSampleRate) + L" Hz.";
+        return -1;
+    }
+
+    if (wasRunning)
+    {
+        std::wstring restartError;
+        if (!target.client.start(restartError))
+        {
+            message = L"Realtime buffers prepared for " +
+                std::to_wstring(desiredSampleRate) +
+                L" Hz, but callback restart failed: " +
+                restartError;
+            return -1;
+        }
+    }
+
+    message = L"Realtime callback buffers prepared for " +
+        std::to_wstring(desiredSampleRate) +
+        L" Hz.";
+    target.lastStatus = target.client.statusText();
+    return 1;
 }
 
 int restartInsertAsioForFormatChangeLocked(NativeHost& target, int expectedChannelCount, std::wstring& message)
@@ -1069,15 +1145,15 @@ int restartInsertAsioForFormatChangeLocked(NativeHost& target, int expectedChann
     const int currentBlockSize = target.insertAsio.currentBlockSize();
     if (!insertAsioRunning && insertAsioOpen)
     {
+        std::wstring stopped;
+        target.insertAsio.stop(stopped);
+
         if (!target.engine.prepareDelayBuffers(desiredSampleRate))
         {
             message = L"Insert ASIO reopen skipped: failed to allocate delay buffers for " +
                 std::to_wstring(desiredSampleRate) + L" Hz.";
             return -1;
         }
-
-        std::wstring stopped;
-        target.insertAsio.stop(stopped);
 
         std::wstring started;
         const bool ok = target.insertAsio.start(desiredSampleRate, desiredBlockSize, expectedChannelCount, started);
@@ -1128,15 +1204,15 @@ int restartInsertAsioForFormatChangeLocked(NativeHost& target, int expectedChann
         return 0;
     }
 
+    std::wstring stopped;
+    target.insertAsio.stop(stopped);
+
     if (!target.engine.prepareDelayBuffers(desiredSampleRate))
     {
         message = L"Insert ASIO restart skipped: failed to allocate delay buffers for " +
             std::to_wstring(desiredSampleRate) + L" Hz.";
         return -1;
     }
-
-    std::wstring stopped;
-    target.insertAsio.stop(stopped);
 
     std::wstring started;
     const bool ok = target.insertAsio.start(desiredSampleRate, desiredBlockSize, expectedChannelCount, started);
@@ -1182,6 +1258,15 @@ int checkInsertAsioFormatChangedLocked(NativeHost& target, std::wstring& message
     if (!insertAsioRunning && !insertAsioOpen)
     {
         message = L"Insert ASIO host is not running.";
+        target.pendingInsertAsioSampleRate = 0;
+        target.pendingInsertAsioBlockSize = 0;
+        target.pendingInsertAsioConfirmations = 0;
+        return 0;
+    }
+
+    if (std::chrono::steady_clock::now() < target.insertAsioFormatCheckCooldownUntil)
+    {
+        message = L"Insert ASIO format check warming up after start/restart.";
         return 0;
     }
 
@@ -1200,6 +1285,26 @@ int checkInsertAsioFormatChangedLocked(NativeHost& target, std::wstring& message
     if (!sampleRateChanged && !blockSizeChanged)
     {
         message = L"Insert ASIO format is current.";
+        target.pendingInsertAsioSampleRate = 0;
+        target.pendingInsertAsioBlockSize = 0;
+        target.pendingInsertAsioConfirmations = 0;
+        return 0;
+    }
+
+    if (target.pendingInsertAsioSampleRate != desiredSampleRate ||
+        target.pendingInsertAsioBlockSize != desiredBlockSize)
+    {
+        target.pendingInsertAsioSampleRate = desiredSampleRate;
+        target.pendingInsertAsioBlockSize = desiredBlockSize;
+        target.pendingInsertAsioConfirmations = 1;
+        message = L"Insert ASIO format change detected; waiting for stable confirmation.";
+        return 0;
+    }
+
+    target.pendingInsertAsioConfirmations++;
+    if (target.pendingInsertAsioConfirmations < 3)
+    {
+        message = L"Insert ASIO format change detected; waiting for stable confirmation.";
         return 0;
     }
 
@@ -1618,6 +1723,24 @@ __declspec(dllexport) int __cdecl ElkaFx_Start(wchar_t* status, int statusChars)
     return ok ? 0 : -1;
 }
 
+__declspec(dllexport) int __cdecl ElkaFx_EnsureRealtimePrepared(wchar_t* status, int statusChars)
+{
+    try
+    {
+        std::lock_guard lock(g_mutex);
+        auto& target = host();
+        std::wstring message;
+        const int result = ensureRealtimePreparedLocked(target, message);
+        writeWide(message, status, statusChars);
+        return result;
+    }
+    catch (...)
+    {
+        writeWide(L"Realtime prepare failed: native exception.", status, statusChars);
+        return -1;
+    }
+}
+
 __declspec(dllexport) void __cdecl ElkaFx_Disconnect()
 {
     std::lock_guard lock(g_mutex);
@@ -1653,6 +1776,13 @@ __declspec(dllexport) void __cdecl ElkaFx_SetPluginGraphEnabled(int kind, int ch
     auto& target = host();
     const auto streamKind = streamKindFromApi(kind);
     target.engine.setChannelPluginGraphEnabled(streamKind, channel, enabled != 0);
+}
+
+__declspec(dllexport) void __cdecl ElkaFx_SetInputCallbackSuppressedChannel(int channel, int suppressed)
+{
+    std::lock_guard lock(g_mutex);
+    auto& target = host();
+    target.engine.setInputCallbackSuppressedChannel(channel, suppressed != 0);
 }
 
 __declspec(dllexport) void __cdecl ElkaFx_SetDirectRoutes(int kind, const NativeDirectRoute* routes, int routeCount)
@@ -1723,6 +1853,7 @@ __declspec(dllexport) void __cdecl ElkaFx_GetStats(NativeStats* stats)
     std::lock_guard lock(g_mutex);
     auto& target = host();
     const auto realtimeStats = target.engine.getStats();
+    const auto callbackStats = target.client.callbackStats();
     stats->connectionState = static_cast<int>(target.client.state());
     stats->mode = apiModeFromCallbackMode(target.mode);
     stats->sampleRate = realtimeStats.sampleRate;
@@ -1730,6 +1861,14 @@ __declspec(dllexport) void __cdecl ElkaFx_GetStats(NativeStats* stats)
     stats->inputChannels = realtimeStats.inputChannels;
     stats->outputChannels = realtimeStats.outputChannels;
     stats->callbackCount = realtimeStats.callbackCount;
+    stats->callbackCommandCount = callbackStats.total;
+    stats->callbackStartingCount = callbackStats.starting;
+    stats->callbackEndingCount = callbackStats.ending;
+    stats->callbackChangeCount = callbackStats.change;
+    stats->callbackBufferInCount = callbackStats.bufferIn;
+    stats->callbackBufferOutCount = callbackStats.bufferOut;
+    stats->callbackBufferMainCount = callbackStats.bufferMain;
+    stats->callbackLastCommand = static_cast<int>(callbackStats.lastCommand);
     stats->lastProcessUsec = realtimeStats.lastProcessUsec;
     stats->peakProcessUsec = realtimeStats.peakProcessUsec;
     stats->callbackCpuPercent = realtimeStats.callbackCpuPercent;
@@ -1809,7 +1948,17 @@ __declspec(dllexport) int __cdecl ElkaFx_RefreshVoicemeeterParameters()
     {
         std::lock_guard lock(g_mutex);
         auto& target = host();
-        return target.client.refreshParameters() ? 0 : -1;
+        const bool refreshed = target.client.refreshParameters();
+        const auto stats = target.engine.getStats();
+        const int configuredSampleRate = configuredVoiceMeeterSampleRate(target);
+        if (configuredSampleRate > 0 && stats.sampleRate <= 0)
+        {
+            const int blockSize = stats.blockSize > 0 ? stats.blockSize : desiredInsertAsioBlockSize(target);
+            if (blockSize > 0)
+                target.engine.updateFormat(configuredSampleRate, blockSize);
+        }
+
+        return refreshed ? 0 : -1;
     }
     catch (...)
     {
@@ -2169,8 +2318,7 @@ int addPluginNodeNative(
         return -1;
     }
 
-    const auto stats = target.engine.getStats();
-    const int maxBlockSize = std::max(4096, stats.blockSize > 0 ? stats.blockSize : 512);
+    const int maxBlockSize = RealtimeEngine::MaxPluginScratchSamples;
 
     const int slot = sandboxed
         ? target.plugins.addSandboxedDiscoveredPluginNode(

@@ -87,6 +87,7 @@ bool VoicemeeterClient::registerCallback(CallbackMode modeToRegister, std::wstri
         return false;
     }
 
+    resetCallbackStats();
     callbackMode = modeToRegister;
     connectionState = ConnectionState::CallbackRegistered;
     return true;
@@ -136,6 +137,20 @@ ConnectionState VoicemeeterClient::state() const noexcept
 CallbackMode VoicemeeterClient::mode() const noexcept
 {
     return callbackMode;
+}
+
+CallbackCommandStats VoicemeeterClient::callbackStats() const noexcept
+{
+    return CallbackCommandStats {
+        callbackCommandCount.load(std::memory_order_acquire),
+        callbackStartingCount.load(std::memory_order_acquire),
+        callbackEndingCount.load(std::memory_order_acquire),
+        callbackChangeCount.load(std::memory_order_acquire),
+        callbackBufferInCount.load(std::memory_order_acquire),
+        callbackBufferOutCount.load(std::memory_order_acquire),
+        callbackBufferMainCount.load(std::memory_order_acquire),
+        callbackLastCommand.load(std::memory_order_acquire)
+    };
 }
 
 std::wstring VoicemeeterClient::statusText() const
@@ -209,15 +224,38 @@ long __stdcall VoicemeeterClient::audioCallback(void* user, long command, void* 
 
 long VoicemeeterClient::handleAudioCallback(long command, void* data, long) noexcept
 {
+    callbackCommandCount.fetch_add(1, std::memory_order_relaxed);
+    callbackLastCommand.store(command, std::memory_order_relaxed);
+
+    switch (command)
+    {
+    case vmr::CommandStarting:
+        callbackStartingCount.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case vmr::CommandEnding:
+        callbackEndingCount.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case vmr::CommandChange:
+        callbackChangeCount.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case vmr::CommandBufferIn:
+        callbackBufferInCount.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case vmr::CommandBufferOut:
+        callbackBufferOutCount.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case vmr::CommandBufferMain:
+        callbackBufferMainCount.fetch_add(1, std::memory_order_relaxed);
+        break;
+    default:
+        break;
+    }
+
     if (command == vmr::CommandStarting || command == vmr::CommandChange)
     {
         auto* info = static_cast<vmr::AudioInfo*>(data);
         if (info != nullptr)
-        {
             engine.updateFormat(static_cast<int>(info->sampleRate), static_cast<int>(info->samplesPerFrame));
-            if (info->sampleRate > 0)
-                engine.prepareDelayBuffers(static_cast<int>(info->sampleRate));
-        }
 
         return 0;
     }
@@ -289,5 +327,17 @@ CallbackStreamKind VoicemeeterClient::toStreamKindForCommand(long command, Callb
     }
 
     return toStreamKind(fallbackMode);
+}
+
+void VoicemeeterClient::resetCallbackStats() noexcept
+{
+    callbackCommandCount.store(0, std::memory_order_release);
+    callbackStartingCount.store(0, std::memory_order_release);
+    callbackEndingCount.store(0, std::memory_order_release);
+    callbackChangeCount.store(0, std::memory_order_release);
+    callbackBufferInCount.store(0, std::memory_order_release);
+    callbackBufferOutCount.store(0, std::memory_order_release);
+    callbackBufferMainCount.store(0, std::memory_order_release);
+    callbackLastCommand.store(0, std::memory_order_release);
 }
 }
