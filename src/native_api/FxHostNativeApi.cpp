@@ -145,7 +145,7 @@ public:
     InsertAsioHost insertAsio;
     PluginHostLayer plugins;
     VoicemeeterClient client;
-    CallbackMode mode = CallbackMode::InputInsert;
+    CallbackMode mode = CallbackMode::None;
     std::wstring lastStatus = L"Native engine ready";
     std::array<int, 34> savedPatchInsertStates {};
     std::array<bool, 34> savedPatchInsertStateValid {};
@@ -217,7 +217,7 @@ CallbackMode callbackModeFromApi(int mode) noexcept
         static_cast<int>(CallbackMode::OutputInsert) |
         static_cast<int>(CallbackMode::Main);
     const int safeMode = mode & validBits;
-    return static_cast<CallbackMode>(safeMode != 0 ? safeMode : static_cast<int>(CallbackMode::InputInsert));
+    return static_cast<CallbackMode>(safeMode);
 }
 
 CallbackStreamKind streamKindFromApi(int mode) noexcept
@@ -1025,6 +1025,13 @@ bool startLocked(NativeHost& target, std::wstring& error)
     if (!target.client.connect(error))
         return false;
 
+    if (target.mode == CallbackMode::None)
+    {
+        target.client.unregisterCallback();
+        target.lastStatus = L"Connected | realtime callback idle";
+        return true;
+    }
+
     const int configuredSampleRate = configuredVoiceMeeterSampleRate(target);
     if (configuredSampleRate > 0 && !target.engine.prepareDelayBuffers(configuredSampleRate))
     {
@@ -1320,6 +1327,16 @@ int checkInsertAsioFormatChangedLocked(NativeHost& target, std::wstring& message
 bool setModeLocked(NativeHost& target, CallbackMode mode, std::wstring& error)
 {
     target.mode = mode;
+    if (mode == CallbackMode::None)
+    {
+        if (!target.client.connect(error))
+            return false;
+
+        target.client.unregisterCallback();
+        target.lastStatus = L"Connected | realtime callback idle";
+        return true;
+    }
+
     const bool wasRunning = target.client.state() == ConnectionState::Running;
     if (wasRunning)
         target.client.stop();

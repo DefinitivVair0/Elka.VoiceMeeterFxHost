@@ -11,6 +11,7 @@ namespace elka
 {
 enum class CallbackMode
 {
+    None = 0x00000000,
     InputInsert = 0x00000001,
     OutputInsert = 0x00000002,
     Main = 0x00000004
@@ -48,6 +49,7 @@ public:
     bool registerCallback(CallbackMode mode, std::wstring& error);
     bool start(std::wstring& error);
     void stop() noexcept;
+    void unregisterCallback() noexcept;
 
     void setPreferredMode(CallbackMode mode) noexcept;
     ConnectionState state() const noexcept;
@@ -73,7 +75,7 @@ private:
     RealtimeEngine& engine;
     VoicemeeterRemoteApi api;
     ConnectionState connectionState = ConnectionState::Disconnected;
-    CallbackMode callbackMode = CallbackMode::InputInsert;
+    CallbackMode callbackMode = CallbackMode::None;
     std::atomic<uint64_t> callbackCommandCount { 0 };
     std::atomic<uint64_t> callbackStartingCount { 0 };
     std::atomic<uint64_t> callbackEndingCount { 0 };

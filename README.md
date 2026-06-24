@@ -24,6 +24,7 @@ orange for VST/plugin work.
 - **Route hue colors**: tint endpoints, wires, and connected nodes so related paths are easier to follow.
 - **Single ping tool**: run a basic callback timing/round-trip check.
 - **VFX text commands**: control delay, volume, direct routing, route enable, and mute-standard routing from MacroButtons over VBAN-TEXT.
+- **Idle callback mode**: when no route, active channel, ping, or connected VST path needs processing, the app stays connected but unregisters from the realtime callback path.
 
 VST3 is the default working plugin format. The UI uses the short label **VST**
 because the same browser and routing area is prepared for legacy VST2 hosting
@@ -59,8 +60,7 @@ Build, Visual Studio, and release-publish instructions are in
 9. Drag from a left endpoint pin into the plugin input pin, then from the plugin output pin back to a right endpoint pin.
 10. Open the plugin editor from the node list or right-click menu to confirm audio is reaching the plugin.
 
-Changes are live. The app starts and maintains the native callback engine
-automatically; there is no separate Start/Stop button for normal use.
+Changes are live. For normal use there is no separate Start/Stop button: the app connects to VoiceMeeter and arms the native realtime callback only when there is active work, such as enabled channels, direct routes, VST cables, or the ping tool. If nothing is active, the status can show an idle connected state and the app leaves the audio callback path alone.
 
 ## Main Window
 
@@ -266,6 +266,8 @@ rewriting the whole engine.
 **Single Ping** opens a small timing tester. It is used to check callback timing
 and routing behavior without the full round-trip tool from the Delay app.
 
+**ASIO Patch** is currently parked and locked in the UI. The card remains visible for later testing, but this build uses the normal VoiceMeeter callback routing path instead. Saved ASIO-patch auto-start settings are ignored while the card is parked.
+
 **VBAN Text** enables the V1 text command listener. It receives MacroButtons
 VBAN-TEXT packets and applies commands with the `VFX` prefix. The default port
 is `6981` and the default stream name is `Command1`, matching the style used in
@@ -314,10 +316,9 @@ The app saves:
 - plugin search text
 - custom plugin scan folders
 - VBAN-TEXT enable, port, stream name, and local-only settings
+- VST groups, group positions, group pin layouts, and group cables
 
-Settings are stored under the current user's local app data folder. The app is
-designed so UI settings can be changed while the native callback engine keeps
-running.
+Settings are stored under the current user's local app data folder. The app is designed so UI settings can be changed while audio keeps running. When the current configuration has no active audio work, the native side stays connected but the realtime callback is idle/unregistered.
 
 ## Notes and Limitations
 
@@ -327,8 +328,7 @@ running.
   configure before builds so this setting is not left stale.
 - VFX text commands currently cover delay, volume, direct routing, route enable,
   and mute-standard routing only. Plugin control is intentionally left out.
-- Faulty plugins can still crash the host process. Separate-process plugin
-  sandboxing is a later phase.
+- Normal plugins load in the main host. Plugins that match known risky vendor markers can be loaded through the embedded worker host so they do not block the main UI during startup. A faulty main-host plugin can still crash the host process.
 - Some plugins do not support the requested pin layout. If a layout fails, remove
   and re-add the plugin or choose a simpler stereo layout.
 - Sidechain pins only work when the plugin exposes a usable sidechain bus.
@@ -336,6 +336,7 @@ running.
   happen inside the audio callback.
 - The native callback path avoids UI work, file access, logging, and allocation
   in the audio thread as much as practical.
+- The installer offers a default-on performance task that runs `powercfg /powerthrottling disable /path "<installed exe>"` for the installed app executable. This prevents Windows from power-throttling the realtime audio host process.
 
 ## Current App Path
 
@@ -350,6 +351,7 @@ Release publish artifacts land here:
 ```text
 artifacts\release\ElkaVoiceMeeterFxHost.exe
 artifacts\release\ElkaVoiceMeeterFxHost-win-x64-framework-dependent.zip
+artifacts\release\ElkaVoiceMeeterFxHostSetup-v0.7.4.exe
 ```
 
 The release EXE is a compact framework-dependent direct download and needs the

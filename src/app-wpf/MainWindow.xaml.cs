@@ -86,6 +86,8 @@ public partial class MainWindow : Window
     private bool _isShuttingDown;
     private bool _trayCloseHintShown;
 
+    private static readonly bool InsertAsioPatchControlEnabled = false;
+    private const string InsertAsioPatchDisabledMessage = "ASIO Patch is parked in this build. Use normal callback routing; this card is kept for later testing.";
     private const int DefaultVbanControlPort = 6981;
     private const string DefaultVbanControlStreamName = "Command1";
     private const string PluginChoiceDragFormat = "ElkaVoiceMeeterFxHost.PluginChoice";
@@ -220,9 +222,16 @@ public partial class MainWindow : Window
         };
 
         LoadSettings();
+        if (!InsertAsioPatchControlEnabled)
+        {
+            _settings.InsertAsioAutoStart = false;
+            _settings.InsertAsioEndpointKeys?.Clear();
+        }
+
         BuildInsertAsioEndpointToggles();
         SetInsertAsioAutoStartCheckBox(_settings.InsertAsioAutoStart);
-        InsertAsioStatusTextBlock.Text = _engine.InsertAsioStatus();
+        ApplyInsertAsioPatchAvailability();
+        InsertAsioStatusTextBlock.Text = InsertAsioPatchControlEnabled ? _engine.InsertAsioStatus() : InsertAsioPatchDisabledMessage;
         UpdatePluginFormatButtons();
         PopulatePluginList();
         QueueSavedPluginNodeRestore();
@@ -235,7 +244,7 @@ public partial class MainWindow : Window
         UpdateLiveStatusText();
         _statusTimer.Start();
 
-        if (_settings.InsertAsioAutoStart)
+        if (InsertAsioPatchControlEnabled && _settings.InsertAsioAutoStart)
         {
             Dispatcher.BeginInvoke(
                 new Action(() => StartInsertAsioFromUi(rememberRunning: true)),
@@ -264,6 +273,21 @@ public partial class MainWindow : Window
             Visible = true
         };
         _trayIcon.DoubleClick += (_, _) => Dispatcher.BeginInvoke(new Action(RestoreFromTray));
+    }
+
+    private void ApplyInsertAsioPatchAvailability()
+    {
+        if (InsertAsioPatchControlEnabled)
+        {
+            return;
+        }
+
+        AsioPatchToggleButton.Content = "ASIO Patch (parked)";
+        AsioPatchToggleButton.IsEnabled = false;
+        AsioPatchToggleButton.ToolTip = InsertAsioPatchDisabledMessage;
+        AsioPatchContentGrid.Visibility = Visibility.Collapsed;
+        InsertAsioAutoStartCheckBox.IsEnabled = false;
+        InsertAsioEndpointTogglesPanel.IsEnabled = false;
     }
 
     private static System.Drawing.Icon CreateTrayIcon()
@@ -409,6 +433,12 @@ public partial class MainWindow : Window
 
     private void AsioPatchToggleButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!InsertAsioPatchControlEnabled)
+        {
+            AppendLog(InsertAsioPatchDisabledMessage);
+            return;
+        }
+
         ToggleCardContent(AsioPatchContentGrid);
     }
 
@@ -578,6 +608,12 @@ public partial class MainWindow : Window
 
     private void ProbeInsertAsioButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!InsertAsioPatchControlEnabled)
+        {
+            AppendLog(InsertAsioPatchDisabledMessage);
+            return;
+        }
+
         var status = _engine.ProbeInsertAsio(_kind);
         InsertAsioStatusTextBlock.Text = status;
         AppendLog(status);
@@ -590,6 +626,16 @@ public partial class MainWindow : Window
 
     private void StartInsertAsioFromUi(bool rememberRunning)
     {
+        if (!InsertAsioPatchControlEnabled)
+        {
+            _settings.InsertAsioAutoStart = false;
+            SetInsertAsioAutoStartCheckBox(false);
+            InsertAsioStatusTextBlock.Text = InsertAsioPatchDisabledMessage;
+            AppendLog(InsertAsioPatchDisabledMessage);
+            QueueSave();
+            return;
+        }
+
         var status = _engine.StartInsertAsio(_kind);
         InsertAsioStatusTextBlock.Text = status;
         AppendLog(status);
@@ -609,6 +655,12 @@ public partial class MainWindow : Window
 
     private void StopInsertAsioButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!InsertAsioPatchControlEnabled)
+        {
+            AppendLog(InsertAsioPatchDisabledMessage);
+            return;
+        }
+
         var status = _engine.StopInsertAsio();
         InsertAsioStatusTextBlock.Text = status;
         AppendLog(status);
@@ -622,6 +674,14 @@ public partial class MainWindow : Window
     {
         if (_loading || _updatingInsertAsioControls)
         {
+            return;
+        }
+
+        if (!InsertAsioPatchControlEnabled)
+        {
+            _settings.InsertAsioAutoStart = false;
+            SetInsertAsioAutoStartCheckBox(false);
+            QueueSave();
             return;
         }
 
@@ -646,6 +706,17 @@ public partial class MainWindow : Window
     {
         InsertAsioEndpointTogglesPanel.Children.Clear();
         _settings.InsertAsioEndpointKeys ??= [];
+        if (!InsertAsioPatchControlEnabled)
+        {
+            InsertAsioEndpointTogglesPanel.Children.Add(new TextBlock
+            {
+                Text = InsertAsioPatchDisabledMessage,
+                TextWrapping = TextWrapping.Wrap,
+                Style = (Style)FindResource("MutedText")
+            });
+            return;
+        }
+
 
         foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
         {
@@ -668,7 +739,7 @@ public partial class MainWindow : Window
 
     private void InsertAsioEndpointToggle_Changed(object sender, RoutedEventArgs e)
     {
-        if (_loading || _updatingInsertAsioControls || sender is not CheckBox { Tag: IoEndpoint endpoint } toggle)
+        if (_loading || _updatingInsertAsioControls || !InsertAsioPatchControlEnabled || sender is not CheckBox { Tag: IoEndpoint endpoint } toggle)
         {
             return;
         }
@@ -703,6 +774,20 @@ public partial class MainWindow : Window
 
     private void ApplyInsertAsioPatchSelection()
     {
+        if (!InsertAsioPatchControlEnabled)
+        {
+            foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
+            {
+                for (var channel = endpoint.Range.Start; channel <= endpoint.Range.End; channel++)
+                {
+                    _engine.SetInputCallbackSuppressedChannel(channel, false);
+                }
+            }
+
+            _engine.RefreshVoicemeeterParameters();
+            return;
+        }
+
         var insertAsioRunning = _engine.IsInsertAsioRunning;
         foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
         {
@@ -722,6 +807,19 @@ public partial class MainWindow : Window
 
     private void SyncInputCallbackSuppression()
     {
+        if (!InsertAsioPatchControlEnabled)
+        {
+            foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
+            {
+                for (var channel = endpoint.Range.Start; channel <= endpoint.Range.End; channel++)
+                {
+                    _engine.SetInputCallbackSuppressedChannel(channel, false);
+                }
+            }
+
+            return;
+        }
+
         var insertAsioRunning = _engine.IsInsertAsioRunning;
         foreach (var endpoint in VoicemeeterIoLayout.GetEndpoints(CallbackMode.Input, _kind))
         {
@@ -1711,8 +1809,11 @@ public partial class MainWindow : Window
 
         _engine.RefreshVoicemeeterParameters();
         StatusTextBlock.Text = _engine.StatusText;
-        InsertAsioStatusTextBlock.Text = _engine.InsertAsioStatus();
-        MaybeRestartInsertAsioAfterFormatChange();
+        InsertAsioStatusTextBlock.Text = InsertAsioPatchControlEnabled ? _engine.InsertAsioStatus() : InsertAsioPatchDisabledMessage;
+        if (InsertAsioPatchControlEnabled)
+        {
+            MaybeRestartInsertAsioAfterFormatChange();
+        }
         MonitorRealtimeCallback();
         var probeText = _engine.ProbeText;
         var patchExplanation = string.Empty;
@@ -1842,7 +1943,7 @@ public partial class MainWindow : Window
 
     private bool HasRealtimeCallbackWork()
     {
-        return _settings.PluginNodes.Count > 0 ||
+        return _settings.PluginNodes.Any(PluginNodeHasCallbackWork) ||
                _settings.CanvasConnections.Count > 0 ||
                _settingsByEndpoint.Values.Any(static settings => settings.HasActiveChannels) ||
                AllDirectRoutes().Any();
@@ -1850,6 +1951,11 @@ public partial class MainWindow : Window
 
     private void MaybeRestartInsertAsioAfterFormatChange()
     {
+        if (!InsertAsioPatchControlEnabled)
+        {
+            return;
+        }
+
         if (_insertAsioFormatRestartInProgress)
         {
             return;
@@ -1893,6 +1999,11 @@ public partial class MainWindow : Window
 
     private void RestartInsertAsioLikeButtons(string reason)
     {
+        if (!InsertAsioPatchControlEnabled)
+        {
+            return;
+        }
+
         var stopStatus = _engine.StopInsertAsio();
         InsertAsioStatusTextBlock.Text = stopStatus;
         AppendLog($"Insert ASIO auto-restart ({reason}) stop: {stopStatus}");
@@ -2281,7 +2392,7 @@ public partial class MainWindow : Window
 
     private CallbackMode ComputeActiveCallbackMode()
     {
-        var active = _selectedMode == CallbackMode.None ? CallbackMode.Input : _selectedMode;
+        var active = CallbackMode.None;
 
         foreach (var settings in _settingsByEndpoint.Values)
         {
@@ -2291,7 +2402,7 @@ public partial class MainWindow : Window
             }
         }
 
-        foreach (var node in _settings.PluginNodes)
+        foreach (var node in _settings.PluginNodes.Where(PluginNodeHasCallbackWork))
         {
             active |= node.Mode;
         }
@@ -2318,8 +2429,13 @@ public partial class MainWindow : Window
             active |= mode;
         }
 
-        return active == CallbackMode.None ? CallbackMode.Input : active;
+        return active;
     }
+
+    private bool PluginNodeHasCallbackWork(PluginNodeSnapshot node) =>
+        _settings.CanvasConnections.Any(connection =>
+            connection.FromSlot == node.Slot ||
+            connection.ToSlot == node.Slot);
 
     private void BuildEndpointButtons()
     {

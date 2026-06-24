@@ -43,6 +43,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "disablepowerthrottling"; Description: "Disable Windows power throttling for Elka VoiceMeeter FX Host"; GroupDescription: "Performance options:"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -52,4 +53,5 @@ Name: "{autoprograms}\ElkaSoft\Elka VoiceMeeter FX Host"; Filename: "{app}\Elka.
 Name: "{autodesktop}\Elka VoiceMeeter FX Host"; Filename: "{app}\Elka.VoiceMeeterFxHost.App.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+Filename: "{sys}\powercfg.exe"; Parameters: "/powerthrottling disable /path ""{app}\Elka.VoiceMeeterFxHost.App.exe"""; StatusMsg: "Disabling Windows power throttling for Elka VoiceMeeter FX Host..."; Flags: runhidden waituntilterminated; Tasks: disablepowerthrottling
 Filename: "{app}\Elka.VoiceMeeterFxHost.App.exe"; Description: "{cm:LaunchProgram,Elka VoiceMeeter FX Host}"; Flags: nowait postinstall skipifsilent

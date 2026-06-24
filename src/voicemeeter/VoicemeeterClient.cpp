@@ -40,13 +40,7 @@ bool VoicemeeterClient::connect(std::wstring& error)
 
 void VoicemeeterClient::disconnect() noexcept
 {
-    stop();
-
-    if (connectionState == ConnectionState::CallbackRegistered)
-    {
-        api.audioCallbackUnregister();
-        connectionState = ConnectionState::Connected;
-    }
+    unregisterCallback();
 
     if (connectionState == ConnectionState::Connected)
         api.logout();
@@ -122,6 +116,19 @@ void VoicemeeterClient::stop() noexcept
         api.audioCallbackStop();
         connectionState = ConnectionState::CallbackRegistered;
     }
+}
+
+void VoicemeeterClient::unregisterCallback() noexcept
+{
+    stop();
+
+    if (connectionState == ConnectionState::CallbackRegistered)
+    {
+        api.audioCallbackUnregister();
+        connectionState = ConnectionState::Connected;
+    }
+
+    resetCallbackStats();
 }
 
 void VoicemeeterClient::setPreferredMode(CallbackMode modeToUse) noexcept
@@ -288,6 +295,8 @@ long VoicemeeterClient::toApiMode(CallbackMode mode) noexcept
 {
     switch (mode)
     {
+    case CallbackMode::None:
+        return 0;
     case CallbackMode::InputInsert:
         return vmr::ModeInputInsert;
     case CallbackMode::OutputInsert:
@@ -303,6 +312,8 @@ CallbackStreamKind VoicemeeterClient::toStreamKind(CallbackMode mode) noexcept
 {
     switch (mode)
     {
+    case CallbackMode::None:
+        return CallbackStreamKind::InputInsert;
     case CallbackMode::InputInsert:
         return CallbackStreamKind::InputInsert;
     case CallbackMode::OutputInsert:

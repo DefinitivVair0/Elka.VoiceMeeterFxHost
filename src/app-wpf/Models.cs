@@ -521,7 +521,7 @@ internal sealed class NativeEngineClient : IDisposable
     private bool _attached;
     private bool _disposed;
     private string _lastStatus = "Native engine bridge not loaded";
-    private CallbackMode _requestedMode = CallbackMode.Input;
+    private CallbackMode _requestedMode = CallbackMode.None;
     private CallbackMode _appliedMode = CallbackMode.None;
 
     public NativeEngineClient()
@@ -850,7 +850,7 @@ internal sealed class NativeEngineClient : IDisposable
 
     public void SetRequestedMode(CallbackMode mode)
     {
-        _requestedMode = mode == CallbackMode.None ? CallbackMode.Input : mode;
+        _requestedMode = mode;
         SetMode(_requestedMode);
     }
 
